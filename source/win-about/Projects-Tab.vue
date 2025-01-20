@@ -59,12 +59,12 @@
           Generation of diagrams and flowcharts from text in a similar manner as Markdown
         </p>
       </div>
-      <div class="project-box" onclick="window.location = 'https://github.com/wooorm/nspell/'">
+      <div class="project-box" onclick="window.location = 'https://github.com/Wulf/nodehun'">
         <h4 class="project-name">
-          nspell
+          nodehun
         </h4>
         <p class="project-description">
-          Hunspell compatible spell-checker
+          The Hunspell binding for NodeJS that exposes as much of Hunspell as possible and also adds new features.
         </p>
       </div>
       <div class="project-box" onclick="window.location = 'http://showdownjs.com/'">
@@ -111,7 +111,7 @@
   </div>
 </template>
 
-<script lang="ts">
+<script setup lang="ts">
 /**
  * @ignore
  * BEGIN HEADER
@@ -128,16 +128,8 @@
  */
 
 import { trans } from '@common/i18n-renderer'
-import { defineComponent } from 'vue'
 
-export default defineComponent({
-  name: 'ProjectsTab',
-  data: function () {
-    return {
-      projectsIntro: trans('dialog.about.other_projects')
-    }
-  }
-})
+const projectsIntro = trans('Zettlr also makes use of these projects:')
 </script>
 
 <style lang="less">

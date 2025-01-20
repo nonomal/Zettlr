@@ -17,8 +17,6 @@ import { promises as fs } from 'fs'
 import { app, ipcMain } from 'electron'
 import chalk from 'chalk'
 import ProviderContract from '../provider-contract'
-import { LogMessage } from '@dts/main/log-provider'
-const hasProp = Object.prototype.hasOwnProperty
 
 /**
  * How many logfiles should the app keep at most?
@@ -36,6 +34,16 @@ enum LogLevel {
   info = 2,
   warning = 3,
   error = 4
+}
+
+/**
+ * A single log message
+ */
+export interface LogMessage {
+  time: string
+  level: LogLevel
+  message: string
+  details?: Error|Record<string, any>|number|string|boolean|any[]
 }
 
 const debugConsole = {
@@ -63,8 +71,8 @@ export default class LogProvider extends ProviderContract {
       const { command } = payload
 
       if (command === 'retrieve-log-chunk') {
-        let { nextIndex } = payload
-        if (nextIndex >= this._log.length) {
+        const nextIndex = parseInt(String(payload.nextIndex), 10)
+        if (nextIndex >= this._log.length || nextIndex < 0) {
           return []
         }
 
@@ -115,11 +123,11 @@ export default class LogProvider extends ProviderContract {
     }
 
     // Simply append to log
-    let msg = {
-      'level': logLevel,
-      'message': message,
-      'details': details,
-      'time': this._getTimestamp()
+    const msg = {
+      level: logLevel,
+      message,
+      details,
+      time: this._getTimestamp()
     }
 
     this._log.push(msg)
@@ -176,8 +184,13 @@ export default class LogProvider extends ProviderContract {
    * Appends all not-yet-written log messages to today's log file
    */
   async _append (): Promise<void> {
-    if (this._fileLock) return // Cannot write until the previous write has finished
-    if (this._entryPointer >= this._log.length - 1) return // Nothing to write
+    if (this._fileLock) {
+      return // Cannot write until the previous write has finished
+    }
+
+    if (this._entryPointer >= this._log.length - 1) {
+      return // Nothing to write
+    }
 
     // First slice the part of the log that is not yet written to file
     let logsToWrite = this._log.slice(this._entryPointer)
@@ -189,7 +202,10 @@ export default class LogProvider extends ProviderContract {
 
     // Now, filter out all verbose entries
     logsToWrite = logsToWrite.filter((entry) => entry.level > LogLevel.verbose)
-    if (logsToWrite.length === 0) return // Apparently, only verbose messages
+
+    if (logsToWrite.length === 0) {
+      return // Apparently, only verbose messages
+    }
 
     // Then map the entries to strings and join them with newlines
     let stringsToWrite = logsToWrite.map((elem) => this._toString(elem))
@@ -236,15 +252,23 @@ export default class LogProvider extends ProviderContract {
     if (message.level === LogLevel.error) level = 'Error'
 
     let details = ''
-    if (Array.isArray(message.details)) {
+    if (message.details instanceof Error) {
+      // There was an error object in the details, so stringify it
+      const name = message.details.name
+      const msg = message.details.message
+      const stack = (message.details.stack !== undefined)
+        ? message.details.stack.replace(/\n+/g, ' --> ')
+        : 'No stack trace provided'
+      details = ` | Native Error: ${name}; ${msg} Stack Trace: ${stack}`
+    } else if (Array.isArray(message.details)) {
       details = ` | Details: ${message.details.join(', ')}`
-    } else if ([ 'number', 'string', 'boolean' ].includes(typeof message.details)) {
-      details = ` | Details: ${message.details as string}`
-    } else if (Object.keys(message.details).length > 0) {
+    } else if (typeof message.details !== 'object') {
+      details = ` | Details: ${String(message.details)}`
+    } else if (message.details !== undefined && Object.keys(message.details).length > 0) {
       details = ` | Details: ${JSON.stringify(message.details)}`
     }
 
-    let timestamp = (hasProp.call(message, 'time')) ? `[${message.time}] ` : ''
+    let timestamp = ('time' in message) ? `[${message.time}] ` : ''
 
     return `${timestamp}[${level}] ${message.message}${details}`
   }

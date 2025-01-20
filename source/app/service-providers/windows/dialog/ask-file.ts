@@ -12,10 +12,18 @@
  * END HEADER
  */
 
-import { app, BrowserWindow, dialog, FileFilter, OpenDialogOptions, OpenDialogReturnValue } from 'electron'
+import {
+  app,
+  dialog,
+  type BrowserWindow,
+  type FileFilter,
+  type OpenDialogOptions,
+  type OpenDialogReturnValue
+} from 'electron'
 import path from 'path'
 import isDir from '@common/util/is-dir'
 import { trans } from '@common/i18n-main'
+import type ConfigProvider from '@providers/config'
 
 /**
  * Displays a dialog to prompt the user for file paths
@@ -36,17 +44,17 @@ export default async function askFileDialog (config: ConfigProvider, win: Browse
   // Fallback filter: All files
   if (filters === null) {
     filters = [{
-      name: trans('system.all_files'),
+      name: trans('All Files'),
       extensions: ['*']
     }]
   }
 
   // Prepare options
   let opt: OpenDialogOptions = {
-    title: trans('system.open_file'),
+    title: trans('Open file'),
     defaultPath: startDir,
     properties: ['openFile'],
-    filters: filters
+    filters
   }
 
   // Should multiple selections be allowed?
@@ -55,8 +63,10 @@ export default async function askFileDialog (config: ConfigProvider, win: Browse
   }
 
   let response: OpenDialogReturnValue
-  // DEBUG: Trying to resolve bug #1645, which seems to relate to modal status vs. promise awaits.
-  if (win !== null && [ 'darwin', 'win32' ].includes(process.platform)) {
+  // DEBUG: Trying to resolve bug #1645, which seems to relate to modal status
+  // vs. promise awaits. UPDATE 2024-03-11: In response to #4952, removing the
+  // platform check again.
+  if (win !== null) {
     response = await dialog.showOpenDialog(win, opt)
   } else {
     response = await dialog.showOpenDialog(opt)

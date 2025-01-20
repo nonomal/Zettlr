@@ -225,7 +225,7 @@ interface CSLKernelConfig {
    *
    * @return  {string|Object|Element|JSON|false}           The return value
    */
-  retrieveLocale: (language: string) => string|Object|Element|JSON|false
+  retrieveLocale: (language: string) => string|Record<string, unknown>|Element|JSON|false
   /**
    * The retrieveItem() function fetches citation data for an item. The
    * function takes an item ID as its sole argument, and returns a JavaScript
@@ -242,7 +242,7 @@ interface CSLKernelConfig {
 /**
  * The actual intantiated CSL kernel configuration
  */
-interface CSLKernel extends CSLKernelConfig {}
+type CSLKernel = CSLKernelConfig
 
 declare module 'citeproc' {
   export class Engine {

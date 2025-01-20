@@ -16,7 +16,7 @@
  * END HEADER
  */
 
-import { Rect, Point, AnyMenuItem, NormalItem } from '@dts/renderer/context'
+import type { Rect, Point, AnyMenuItem, NormalItem } from '@dts/renderer/context'
 
 const ipcRenderer = window.ipc
 
@@ -39,12 +39,12 @@ export default function showPopupMenu (position: Point|Rect, items: AnyMenuItem[
     height: 0
   }
 
-  if (position.hasOwnProperty('width') && position.hasOwnProperty('height')) {
-    targetRect = position as Rect
+  if ('width' in position && 'height' in position) {
+    targetRect = position
   } else {
     // A point is basically a rect with no width or height
-    targetRect.top = (position as Point).y
-    targetRect.left = (position as Point).x
+    targetRect.top = position.y
+    targetRect.left = position.x
   }
 
   if (process.platform === 'darwin') {
@@ -87,7 +87,7 @@ export default function showPopupMenu (position: Point|Rect, items: AnyMenuItem[
       })
     } else if (item.type === 'submenu' && item.enabled) {
       // Enable displaying the sub menu
-      let closeSubmenu: Function|null = null
+      let closeSubmenu: null|(() => void) = null
 
       appMenu.addEventListener('mousemove', (event: MouseEvent) => {
         const point = { x: event.clientX, y: event.clientY }
@@ -120,6 +120,18 @@ export default function showPopupMenu (position: Point|Rect, items: AnyMenuItem[
           closeSubmenu()
           closeSubmenu = null
         } // Else: Keep it open
+      })
+
+      appMenu.addEventListener('mousedown', (event: MouseEvent) => {
+        const point = { x: event.clientX, y: event.clientY }
+        const rect: DOMRect = menuItem.getBoundingClientRect()
+
+        if (pointInRect(point, rect)) {
+          // It's on the menu item, so prevent default and stop propagation so
+          // that the menu doesn't close
+          event.preventDefault()
+          event.stopPropagation()
+        }
       })
     }
 
@@ -192,8 +204,8 @@ function renderMenuItem (item: AnyMenuItem, elementClass?: string): HTMLElement 
   }
 
   menuItem.classList.add(item.type)
-  if (item.hasOwnProperty('id')) {
-    menuItem.dataset.id = (item as NormalItem).id
+  if ('id' in item) {
+    menuItem.dataset.id = item.id
   }
 
   // In case the caller wants an additional class on the item
@@ -208,11 +220,11 @@ function renderMenuItem (item: AnyMenuItem, elementClass?: string): HTMLElement 
 
   // Specials for checkboxes and radios
   if (item.type === 'checkbox' && item.checked) {
-    const icon = document.createElement('clr-icon')
+    const icon = document.createElement('cds-icon')
     icon.setAttribute('shape', 'check')
     statusElement.appendChild(icon)
   } else if (item.type === 'radio') {
-    const icon = document.createElement('clr-icon')
+    const icon = document.createElement('cds-icon')
     icon.setAttribute('shape', (item.checked) ? 'dot-circle' : 'circle')
     statusElement.appendChild(icon)
   }
@@ -230,9 +242,9 @@ function renderMenuItem (item: AnyMenuItem, elementClass?: string): HTMLElement 
   menuItem.appendChild(afterElement)
 
   if (item.type === 'submenu') {
-    const submenuIndicator = document.createElement('clr-icon')
+    const submenuIndicator = document.createElement('cds-icon')
     submenuIndicator.setAttribute('shape', 'angle')
-    submenuIndicator.setAttribute('dir', 'right')
+    submenuIndicator.setAttribute('direction', 'right')
     afterElement.appendChild(submenuIndicator)
   } else if (item.type !== 'separator' && item.accelerator != null) {
     const accel = document.createElement('span')
@@ -297,6 +309,7 @@ function pointInRect (point: Point, rect: Rect): boolean {
  */
 function positionMenu (menu: HTMLElement, target: Rect): void {
   // Now position the element: First generally where it is supposed to be.
+  const PADDING = 10 // Generic padding to the edges of the window
   menu.style.top = `${target.top}px`
   menu.style.left = `${target.left + target.width}px`
   const bounds = menu.getBoundingClientRect()
@@ -318,7 +331,7 @@ function positionMenu (menu: HTMLElement, target: Rect): void {
     menu.style.top = `${window.innerHeight - bounds.height - 10}px`
   } else if (isTooHigh) {
     // Crunch it together (also apply a margin of 10px again)
-    menu.style.top = '10px'
-    menu.style.height = `${window.innerHeight - 20}px`
+    menu.style.top = `${PADDING}px`
+    menu.style.height = `${window.innerHeight - 2 * PADDING}px`
   }
 }

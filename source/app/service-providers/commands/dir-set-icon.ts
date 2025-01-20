@@ -25,13 +25,13 @@ export default class DirSetIcon extends ZettlrCommand {
     * @param  {Object} arg An object containing both a hash and an icon
     */
   async run (evt: string, arg: any): Promise<boolean> {
-    let dir = this._app.fsal.findDir(arg.path)
+    let dir = this._app.workspaces.findDir(arg.path)
 
-    if (dir === null) {
+    if (dir === undefined) {
       return false
     }
 
-    await this._app.fsal.setDirectorySetting(dir, { 'icon': arg.icon })
+    await this._app.fsal.setDirectorySetting(dir, { icon: arg.icon })
     return true
   }
 }

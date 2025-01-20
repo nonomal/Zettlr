@@ -22,284 +22,424 @@
 import './editor.less'
 
 /**
- * UTILITY FUNCTIONS
- */
-
-import getCodeMirrorDefaultOptions from './get-cm-options'
-import safeAssign from '@common/util/safe-assign'
-import countWords from '@common/util/count-words'
-import { getConverter } from '@common/util/md-to-html'
-import generateKeymap from './generate-keymap'
-import generateTableOfContents from './util/generate-toc'
-
-// Search plugin (module-namespaced set of utility functions)
-import { searchNext, searchPrevious, replaceNext, replacePrevious, replaceAll, stopSearch } from './plugins/search'
-
-/**
  * APIs
  */
 import EventEmitter from 'events'
 
-/**
- * CODEMIRROR & DEPENDENCIES
- */
-import './load-plugins'
-import CodeMirror, { fromTextArea } from 'codemirror'
+// CodeMirror imports
+import { EditorView } from '@codemirror/view'
+import {
+  EditorState,
+  Text,
+  type Extension,
+  type SelectionRange
+} from '@codemirror/state'
+import { syntaxTree } from '@codemirror/language'
+
+// Keymaps/Input modes
+import { emacs } from '@replit/codemirror-emacs'
+import { vimPlugin } from './plugins/vim-mode'
+
+import { type ToCEntry, tocField } from './plugins/toc-field'
+import {
+  citekeyUpdate,
+  filesUpdate,
+  tagsUpdate,
+  snippetsUpdate
+} from './autocomplete'
+
+// Main configuration
+import {
+  type CoreExtensionOptions,
+  getJSONExtensions,
+  getMarkdownExtensions,
+  getTexExtensions,
+  getYAMLExtensions,
+  inputModeCompartment,
+  getMainEditorThemes
+} from './editor-extension-sets'
+
+import {
+  configField,
+  configUpdateEffect,
+  getDefaultConfig,
+  type EditorConfigOptions,
+  type EditorConfiguration
+} from './util/configuration'
+
+// Custom commands
+import {
+  applyComment,
+  applyTaskList,
+  insertImage,
+  insertLink
+} from './commands/markdown'
+import { addNewFootnote } from './commands/footnotes'
+
+// Utilities
+import { copyAsHTML, pasteAsPlain } from './util/copy-paste-cut'
+import openMarkdownLink from './util/open-markdown-link'
+import { highlightRangesEffect } from './plugins/highlight-ranges'
+
+import safeAssign from '@common/util/safe-assign'
+import { countAll } from '@common/util/counter'
+import { DocumentType } from '@dts/common/documents'
+import { type TagRecord } from '@providers/tags'
+import {
+  reloadStateEffect,
+  type PullUpdateCallback,
+  type PushUpdateCallback
+} from './plugins/remote-doc'
+import { markdownToAST } from '../markdown-utils'
+import { countField } from './plugins/statistics-fields'
+import type { SyntaxNode } from '@lezer/common'
+import { darkModeEffect } from './theme/dark-mode'
+import { editorMetadataFacet } from './plugins/editor-metadata'
+import { projectInfoUpdateEffect, type ProjectInfo } from './plugins/project-info-field'
+
+export interface DocumentWrapper {
+  path: string
+  state: EditorState
+  type: DocumentType
+}
 
 /**
- * HOOKS (plugins that hook on to event listeners)
+ * This is basically the old Codemirror 5 way of representing positions. While
+ * Codemirror 6 is way more efficient describing everything as a string offset,
+ * the line/ch representation makes a lot of sense for the users, so we keep
+ * offering that here.
  */
-import dropFilesHook from './hooks/drop-files'
-import footnotesHook from './hooks/footnotes'
-import formattingBarHook from './hooks/formatting-bar'
-import pasteImagesHook from './hooks/paste-images'
-import matchStyleHook from './hooks/match-style'
-import { indentLinesHook, clearLineIndentationCache } from './hooks/indent-wrapped-lines'
-import headingClassHook from './hooks/heading-classes'
-import codeblockClassHook from './hooks/codeblock-classes'
-import taskItemClassHook from './hooks/task-item-classes'
-import muteLinesHook from './hooks/mute-lines'
-import renderElementsHook from './hooks/render-elements'
-import typewriterHook from './hooks/typewriter'
-import { autocompleteHook, setAutocompleteDatabase } from './hooks/autocomplete'
-import linkTooltipsHook from './hooks/link-tooltips'
-import noteTooltipsHook from './hooks/note-preview'
+export interface UserReadablePosition {
+  line: number
+  ch: number
+}
 
-import displayContextMenu from './display-context-menu'
+export interface DocumentInfo {
+  words: number
+  chars: number
+  cursor: UserReadablePosition
+  selections: Array<{
+    anchor: UserReadablePosition
+    head: UserReadablePosition
+    words: number
+    chars: number
+  }>
+}
 
-const ipcRenderer = window.ipc
-const clipboard = window.clipboard
+export type FetchDoc = (filePath: string) => Promise<{ content: string, type: DocumentType, startVersion: number }>
+
+/**
+ * This interface is used to provide the editor with an API of where to fetch
+ * the documents from. The remote could be, e.g., either behind a websocket or
+ * an IPC bridge.
+ */
+export interface DocumentAuthorityAPI {
+  /**
+   * Used to fetch the document from the document authority
+   */
+  fetchDoc: FetchDoc
+  /**
+   * Used to pull new updates from the document authority
+   */
+  pullUpdates: PullUpdateCallback
+  /**
+   * Used to push updates to the document authority
+   */
+  pushUpdates: PushUpdateCallback
+}
 
 export default class MarkdownEditor extends EventEmitter {
-  private readonly _instance: CodeMirror.Editor
-  private readonly _anchorElement: null|HTMLTextAreaElement
-  private _readabilityMode: boolean
-  private _currentDocumentMode: string
-  private _cmOptions: any
-  private _countChars: boolean
-  private readonly _md2html: ReturnType<typeof getConverter>
+  /**
+   * The underlying CodeMirror view
+   *
+   * @var {EditorView}
+   */
+  private readonly _instance: EditorView
+  /**
+   * The absolute path to the document represented by this MainEditor instance.
+   *
+   * @var {string}
+   */
+  private readonly representedDocument: string
+  /**
+   * The API method used to synchronize the document with an authority.
+   *
+   * @var {DocumentAuthorityAPI}
+   */
+  private readonly authority: DocumentAuthorityAPI
+  /**
+   * The full editor configuration
+   *
+   * @var {EditorConfiguration}
+   */
+  private config: EditorConfiguration
 
   /**
-   * Creates a new MarkdownEditor instance attached to the anchorElement
+   * The database cache for the various autocompletes.
    *
-   * @param   {HTMLTextAreaElement|string}  anchorElement   The anchor element (either a DOM node or an ID to be used with document.getElementById)
-   * @param   {Object}                      [cmOptions={}]  Optional CodeMirror options. If no object is provided, the instance will be instantiated with default options for Zettlr.
+   * @var {any}
    */
-  constructor (anchorElement: HTMLTextAreaElement|string, cmOptions = {}) {
+  private readonly databaseCache: {
+    tags: TagRecord[]
+    citations: Array<{ citekey: string, displayText: string }>
+    snippets: Array<{ name: string, content: string }>
+    files: Array<{ filename: string, displayName: string, id: string }>
+  }
+
+  /**
+   * Creates a new MarkdownEditor instance associated with the given leafId and
+   * the representedDocument. Immediately after instantiation the editor will
+   * pull the document from the given authorityAPI and set it up.
+   *
+   * NOTE that you will have to append the resulting editor DOM element onto the
+   * DOM tree yourself in order for the editor to actually show up. Example:
+   *
+   * ```ts
+   * const editor = new MarkdownEditor(leafId, filePath, api)
+   * const container = document.getElementById('container')
+   * container.appendChild(editor.dom)
+   * ```
+   *
+   * @param  {string}                leafId               The ID of the leaf
+   *                                                      this editor is part of
+   * @param  {string}                windowId             The window's ID
+   * @param  {string}                representedDocument  The absolute path to
+   *                                                      the file that will be
+   *                                                      loaded in this editor
+   * @param  {DocumentAuthorityAPI}  authorityAPI         The authority API this
+   *                                                      editor should use.
+   *                                                      Should normally be the
+   *                                                      IPC authority.
+   */
+  constructor (
+    readonly leafId: string,
+    readonly windowId: string,
+    representedDocument: string,
+    authorityAPI: DocumentAuthorityAPI,
+    configOverride?: Partial<EditorConfiguration>
+  ) {
     super() // Set up the event emitter
-    this._anchorElement = null
-    this._readabilityMode = false
-    this._currentDocumentMode = 'multiplex'
-    this._cmOptions = getCodeMirrorDefaultOptions(this)
-    this._countChars = false
 
-    this._md2html = getConverter(window.getCitation)
+    this.authority = authorityAPI
+    this.representedDocument = representedDocument
 
-    // Parse the anchorElement until we get something useful
-    if (typeof anchorElement === 'string' && document.getElementById(anchorElement) !== null) {
-      const anchor = document.getElementById(anchorElement)
-      if (anchor instanceof HTMLTextAreaElement) {
-        this._anchorElement = anchor
-      } else {
-        throw new Error('Could not instantiate MarkdownEditor: anchorElement did not describe an HTMLTextAreaElement')
-      }
-    } else if (anchorElement instanceof HTMLTextAreaElement) {
-      this._anchorElement = anchorElement
-    } else {
-      throw new Error(`Could not instantiate MarkdownEditor: anchorElement must be an ID or a DOM node (received: ${typeof anchorElement})`)
+    // Since the editor state needs to be rebuilt from scratch sometimes, we
+    // cache the autocomplete databases so that we don't have to re-fetch them
+    // everytime.
+    this.databaseCache = { tags: [], citations: [], snippets: [], files: [] }
+
+    // Same goes for the config
+    this.config = getDefaultConfig()
+    // TODO: This is bad style imho
+    this.config.metadata.path = representedDocument
+    if (configOverride !== undefined) {
+      this.setOptions(configOverride)
     }
 
-    // Now, instantiate CodeMirror with the defaults
-    this._instance = fromTextArea(this._anchorElement, this._cmOptions)
-
-    // Immediately afterwards, set the new options passed to overwrite
-    this.setOptions(cmOptions)
-
-    // Set the special CodeMirror-readonly class on the wrapper, because each
-    // editor instance is readonly initially, and needs to be enabled
-    // programmatically by setting MarkdownEditor::readonly = false.
-    this._instance.getWrapperElement().classList.add('CodeMirror-readonly')
-
-    // Attach plugins using event listeners ("hooks" in lieu of a better name)
-    dropFilesHook(this._instance)
-    footnotesHook(this._instance)
-    formattingBarHook(this._instance)
-    pasteImagesHook(this._instance)
-    matchStyleHook(this._instance)
-    indentLinesHook(this._instance)
-    headingClassHook(this._instance)
-    codeblockClassHook(this._instance)
-    taskItemClassHook(this._instance)
-    muteLinesHook(this._instance)
-    renderElementsHook(this._instance)
-    typewriterHook(this._instance)
-    autocompleteHook(this._instance)
-    linkTooltipsHook(this._instance)
-    noteTooltipsHook(this._instance)
-
-    // Indicate interactive elements while either the Command or Control-key is
-    // held down.
-    document.addEventListener('keydown', (event) => {
-      const cmd = process.platform === 'darwin' && event.metaKey
-      const ctrl = process.platform !== 'darwin' && event.ctrlKey
-
-      if (!cmd && !ctrl) {
-        return
-      }
-
-      const wrapper = this._instance.getWrapperElement()
-      const elements = wrapper.querySelectorAll('.cma, .cm-zkn-link, .cm-zkn-tag')
-
-      elements.forEach(element => {
-        element.classList.add('meta-key')
-      })
+    // Create the editor ...
+    this._instance = new EditorView({
+      state: undefined,
+      parent: undefined
     })
 
-    // And don't forget to remove the classes again
-    document.addEventListener('keyup', (event) => {
-      if (![ 'Meta', 'Control' ].includes(event.key)) {
-        return // Not the right released key
-      }
+    // ... and immediately begin loading the document
+    this.loadDocument().catch(err => console.error(err))
+  }
 
-      const wrapper = this._instance.getWrapperElement()
-      const elements = wrapper.querySelectorAll('.cma, .cm-zkn-link, .cm-zkn-tag')
+  /**
+   * Returns the correct set of extensions for the given document
+   *
+   * @param   {string}        filePath      The file path
+   * @param   {DocumentType}  type          The type of file we're dealing with
+   * @param   {number}        startVersion  The initial synchronization number
+   *
+   * @return  {Extension[]}                 The extension set
+   */
+  private _getExtensions (filePath: string, type: DocumentType, startVersion: number): Extension[] {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const editorInstance = this
 
-      elements.forEach(element => {
-        element.classList.remove('meta-key')
-      })
-    })
+    const options: CoreExtensionOptions = {
+      initialConfig: JSON.parse(JSON.stringify(this.config)),
+      remoteConfig: {
+        filePath,
+        startVersion,
+        pullUpdates: this.authority.pullUpdates,
+        pushUpdates: this.authority.pushUpdates
+      },
+      updateListener: (update) => {
+        // Listen for changes and emit events appropriately
+        if (update.docChanged) {
+          this.emit('change')
+        }
+        if (update.focusChanged && this._instance.hasFocus) {
+          this.emit('focus')
+        }
+        if (update.selectionSet) {
+          this.emit('cursorActivity')
+        }
 
-    // Propagate necessary events to the master process
-    this._instance.on('change', (cm, changeObj) => {
-      this.emit('change', changeObj)
-    })
+        // Listen for config updates, and parse them into the internal cache. We
+        // do it this way, because the editor itself is also capable of changing
+        // its configuration (e.g., via the statusbar). This way we ensure that
+        // both external updates (via setOptions) as well as internal updates
+        // both end up in our cache.
+        for (const transaction of update.transactions) {
+          for (const effect of transaction.effects) {
+            if (effect.is(reloadStateEffect)) {
+              // ATTENTION: The document state is out of sync with the document
+              // authority, so we must reload it.
+              this.reload().catch(err => console.error('Could not reload document state', err))
+              return
+            }
+          }
+        }
+      },
+      domEventsListeners: {
+        mousedown (event, view) {
+          const cmd = event.metaKey && process.platform === 'darwin'
+          const ctrl = event.ctrlKey && process.platform !== 'darwin'
+          if (!cmd && !ctrl) {
+            return false
+          }
 
-    this._instance.on('cursorActivity', (cm) => {
-      this.emit('cursorActivity')
-    })
+          const pos = view.posAtCoords({ x: event.clientX, y: event.clientY })
+          if (pos === null) {
+            return false
+          }
 
-    this._instance.on('mousedown', (cm, event) => {
-      // Open links on both Cmd and Ctrl clicks - otherwise stop handling event
-      if (process.platform === 'darwin' && !event.metaKey) return true
-      if (process.platform !== 'darwin' && !event.ctrlKey) return true
+          const nodeAt = syntaxTree(view.state).resolve(pos, 0)
 
-      let cursor = this._instance.coordsChar({ left: event.clientX, top: event.clientY })
-      let tokenInfo = this._instance.getTokenAt(cursor)
+          // Both plain URLs as well as Zettelkasten links and tags are
+          // implemented on the syntax tree.
+          if (nodeAt.type.name === 'URL') {
+            // We found a plain link!
+            const url = view.state.sliceDoc(nodeAt.from, nodeAt.to)
+            if (url.startsWith('[[') && url.endsWith(']]')) {
+              editorInstance.emit('zettelkasten-link', url.substring(2, url.length - 2))
+            } else {
+              openMarkdownLink(url, view)
+            }
+            event.preventDefault()
+            return true
+          } else if ([ 'ZknLinkContent', 'ZknLinkTitle', 'ZknLinkPipe' ].includes(nodeAt.type.name)) {
+            // We found a Zettelkasten link!
+            event.preventDefault()
+            // In these cases, nodeAt.parent is always a ZettelkastenLink
+            const contentNode = nodeAt.parent?.getChild('ZknLinkContent')
+            if (contentNode != null) {
+              const linkContents = view.state.sliceDoc(contentNode.from, contentNode.to)
+              editorInstance.emit('zettelkasten-link', linkContents)
+            }
+            return true
+          } else if (nodeAt.type.name === 'ZknTagContent') {
+            // A tag!
+            const tagContents = view.state.sliceDoc(nodeAt.from, nodeAt.to)
+            editorInstance.emit('zettelkasten-tag', tagContents)
+            event.preventDefault()
+            return true
+          }
 
-      if (tokenInfo.type === null) {
-        return true
-      }
+          // Lastly, the user may have clicked somewhere in a link. However,
+          // since the link description can take various inline elements, we
+          // have to recursively move up the tree until we find a 'Link' element
+          // or abort if we reach the top
+          let currentNode: SyntaxNode|null = nodeAt
+          while (currentNode !== null && currentNode.name !== 'Link') {
+            currentNode = currentNode.parent
+          }
 
-      let tokenList = tokenInfo.type.split(' ')
-
-      if (tokenList.includes('zkn-link')) {
-        event.preventDefault()
-        ;(event as any).codemirrorIgnore = true
-        this.emit('zettelkasten-link', tokenInfo.string)
-      } else if (tokenList.includes('zkn-tag')) {
-        event.preventDefault()
-        ;(event as any).codemirrorIgnore = true
-        this.emit('zettelkasten-tag', tokenInfo.string)
-      } else if (event.target !== null) {
-        // It could be that it's a frontmatter tag. In that case, we shouldn't
-        // check the tokenType, but rather class names
-        if ((event.target as HTMLElement).classList.contains('zkn-tag')) {
-          event.preventDefault()
-          ;(event as any).codemirrorIgnore = true
-          this.emit('zettelkasten-tag', `#${(event.target as HTMLElement).textContent as string}`)
+          if (currentNode !== null) {
+            // We have a link
+            const urlNode = currentNode.getChild('URL')
+            if (urlNode !== null) {
+              const url = view.state.sliceDoc(urlNode.from, urlNode.to)
+              if (url.startsWith('[[') && url.endsWith(']]')) {
+                editorInstance.emit('zettelkasten-link', url.substring(2, url.length - 2))
+              } else {
+                openMarkdownLink(url, view)
+              }
+              event.preventDefault()
+              return true
+            }
+          }
         }
       }
-    })
+    }
 
-    // Display a context menu if appropriate
-    this._instance.getWrapperElement().addEventListener('contextmenu', (event) => {
-      const shouldSelectWordUnderCursor = displayContextMenu(event, this._instance.isReadOnly(), (command: string) => {
-        switch (command) {
-          case 'cut':
-          case 'copy':
-          case 'paste':
-            // NOTE: We do not send selectAll to main albeit there is such a command
-            // because in the specific case of CodeMirror this results in unwanted
-            // behaviour.
-            // Needs to be issued from main on the holding webContents
-            ipcRenderer.send('window-controls', { command: command })
-            break
-          case 'pasteAsPlain':
-            this.pasteAsPlainText()
-            break
-          case 'copyAsHTML':
-            this.copyAsHTML()
-            break
-          default:
-            this._instance.execCommand(command)
-            break
-        }
-        // In any case, re-focus the editor, either for cut/copy/paste to work
-        // or to resume working afterwards
-        this._instance.focus()
-      }, (wordToReplace: string) => {
-        // Simply replace the selection with the given word
-        this._instance.replaceSelection(wordToReplace)
-      })
-
-      // If applicable, select the word under cursor
-      if (shouldSelectWordUnderCursor) {
-        this._instance.execCommand('selectWordUnderCursor')
-      }
-    })
-
-    // Listen to updates from the assets provider
-    ipcRenderer.on('assets-provider', (event, which) => {
-      if (which === 'snippets-updated') {
-        // The snippet list has been updated, so we must reflect this.
-        this.updateSnippetAutocomplete().catch(err => console.error(err))
-      }
-    })
-
-    // Since themes use different fonts, we need to clear the indentation cache
-    ipcRenderer.on('config-provider', (event, { command, payload }) => {
-      if (command === 'update' && payload === 'display.theme') {
-        clearLineIndentationCache()
-        this._instance.refresh()
-      }
-    })
-
-    // The same holds true for custom CSS (not necessarily, but the user won't
-    // play around that much with custom CSS)
-    ipcRenderer.on('css-provider', (event, { command }) => {
-      if (command === 'custom-css-updated') {
-        clearLineIndentationCache()
-        this._instance.refresh()
-      }
-    })
-
-    // Initial retrieval of snippets
-    this.updateSnippetAutocomplete().catch(err => console.error(err))
-  } // END CONSTRUCTOR
-
-  // SEARCH FUNCTIONALITY
-  searchNext (term: string): void {
-    searchNext(this._instance, term)
+    switch (type) {
+      case DocumentType.Markdown:
+        return getMarkdownExtensions(options)
+      case DocumentType.JSON:
+        return getJSONExtensions(options)
+      case DocumentType.YAML:
+        return getYAMLExtensions(options)
+      case DocumentType.LaTeX:
+        return getTexExtensions(options)
+    }
   }
 
-  searchPrevious (term: string): void {
-    searchPrevious(this._instance, term)
+  /**
+   * Loads the document from main and sets up everything required to display and
+   * edit it.
+   */
+  async loadDocument (): Promise<void> {
+    const { content, type, startVersion } = await this.authority.fetchDoc(this.representedDocument)
+
+    // The documents contents have changed, so we must recreate the state
+    const extensions = this._getExtensions(this.representedDocument, type, startVersion)
+    // This particular editor type needs access to the window and leaf IDs
+    extensions.push(editorMetadataFacet.of({ windowId: this.windowId, leafId: this.leafId }))
+
+    const state = EditorState.create({
+      doc: Text.of(content.split('\n')),
+      extensions
+    })
+
+    this._instance.setState(state)
+    // Ensure the theme switcher picks the state change up; this somehow doesn't
+    // properly work after the document has been mounted to the DOM.
+    this._instance.dispatch({ effects: configUpdateEffect.of(this.config) })
+
+    // Provide the cached databases to the state (can be overridden by the
+    // caller afterwards by calling setCompletionDatabase)
+    this._instance.dispatch({ effects: tagsUpdate.of(this.databaseCache.tags) })
+    this._instance.dispatch({ effects: citekeyUpdate.of(this.databaseCache.citations) })
+    this._instance.dispatch({ effects: snippetsUpdate.of(this.databaseCache.snippets) })
+    this._instance.dispatch({ effects: filesUpdate.of(this.databaseCache.files) })
+
+    // Determine if this is a code doc and add the corresponding class to the
+    // outer content DOM so that we can style it.
+    if (type !== DocumentType.Markdown) {
+      this._instance.contentDOM.classList.add('code')
+    }
+
+    this._instance.focus()
   }
 
-  replaceNext (term: string, replacement: string): void {
-    replaceNext(this._instance, term, replacement)
+  /**
+   * This function allows to reload the full editor contents. This is useful if
+   * a setting has changed that requires extensions to be fully reloaded.
+   */
+  async reload (): Promise<void> {
+    await this.loadDocument()
   }
 
-  replacePrevious (term: string, replacement: string): void {
-    replacePrevious(this._instance, term, replacement)
+  /**
+   * Unmount the editor instance entirely. NOTE: After calling this, DO NO
+   * LONGER USE THIS CLASS INSTANCE! Instantiate it anew!
+   */
+  public unmount (): void {
+    this.instance.destroy()
   }
 
-  replaceAll (term: string, replacement: string): void {
-    replaceAll(this._instance, term, replacement)
-  }
-
-  stopSearch (): void {
-    stopSearch()
+  /**
+   * Allows highlighting of arbitrary ranges independent of a search
+   *
+   * @param  {SelectionRange[]}  ranges  The ranges to highlight
+   */
+  highlightRanges (ranges: SelectionRange[]): void {
+    this._instance.dispatch({ effects: highlightRangesEffect.of(ranges) })
   }
 
   /**
@@ -307,161 +447,142 @@ export default class MarkdownEditor extends EventEmitter {
    * text present.
    */
   pasteAsPlainText (): void {
-    const plainText = clipboard.readText()
-
-    // Simple programmatical paste.
-    if (plainText.length > 0) {
-      this._instance.replaceSelection(plainText)
-    }
+    pasteAsPlain(this._instance)
   }
 
   /**
    * Copies the current editor contents into the clipboard as HTML
    */
   copyAsHTML (): void {
-    if (!this._instance.somethingSelected()) return
-    let md = this._instance.getSelections().join(' ')
-    let html = this._md2html(md)
-    // Write both the HTML and the Markdown
-    // (as fallback plain text) to the clipboard
-    clipboard.write({ 'text': md, 'html': html })
+    copyAsHTML(this._instance)
   }
 
   /**
    * Small function that jumps to a specific line in the editor.
    *
    * @param  {number} line The line to pull into view
-   * @param {boolean} setCursor If set to true, will also change the cursor position to line
    */
-  jtl (line: number, setCursor: boolean = false): void {
-    const { from, to } = this._instance.getViewport()
-    const viewportSize = to - from
-    // scrollIntoView first and foremost pulls something simply into view, but
-    // we want it to be at the top of the window as expected by the user, so
-    // we need to pull in a full viewport, beginning at the corresponding line
-    // and expanding unto one full viewport size.
-    let lastLine = line + viewportSize
-
-    // CodeMirror will not sanitise the viewport size.
-    if (lastLine >= this._instance.lineCount()) {
-      lastLine = this._instance.lineCount() - 1
+  jtl (line: number): void {
+    if (line > 0 && line <= this._instance.state.doc.lines) {
+      const lineDesc = this._instance.state.doc.line(line)
+      this._instance.dispatch({
+        selection: { anchor: lineDesc.from, head: lineDesc.to },
+        effects: EditorView.scrollIntoView(lineDesc.from, { y: 'center' })
+      })
     }
-
-    this._instance.scrollIntoView({
-      from: { line: line, ch: 0 },
-      to: { line: lastLine, ch: 0 }
-    })
-
-    if (setCursor) {
-      console.log('Setting cursor!')
-      this._instance.setCursor({ line: line, ch: 0 })
-      this._instance.focus()
-    }
+    this._instance.focus()
   }
 
   /**
-   * Sets the current options with a new options object, which will be merged
+   * Moves the section that starts with an ATX heading on the from-line to the
+   * line identified by to
+   *
+   * @param   {number}  from  The starting line (including the section heading)
+   * @param   {number}  to    The target line for the section (is -1 if it should be moved to the end)
+   */
+  moveSection (from: number, to: number): void {
+    const toc = this._instance.state.field(tocField)
+    const entry = toc.find(e => e.line === from)
+
+    if (entry === undefined) {
+      return // Something went wrong
+    }
+
+    // The section ends at either the next higher or same-level heading
+    const nextSections = toc.slice(toc.indexOf(entry) + 1)
+    let endOfStartPos = this._instance.state.doc.length
+
+    for (const section of nextSections) {
+      if (section.level <= entry.level) {
+        endOfStartPos = section.pos - 1
+        break
+      }
+    }
+
+    const toLine = to !== -1 ? to : this._instance.state.doc.lines
+    const targetPos = this._instance.state.doc.line(toLine).to
+    const entryContents = this._instance.state.sliceDoc(entry.pos, endOfStartPos)
+
+    // Now, dispatch the updates.
+    this._instance.dispatch({
+      changes: [
+        // First, "cut"
+        { from: entry.pos, to: endOfStartPos, insert: '' },
+        // Then, "paste"
+        { from: targetPos, insert: entryContents }
+      ]
+    })
+  }
+
+  /**
+   * Updates the provided options for all currently loaded documents.
    *
    * @param   {Object}  newOptions  The new options
    */
-  setOptions (newOptions: any): void {
-    // Before actually merging the options, we have to detect changes in the
-    // rendering preferences.
-    let shouldRemoveMarkers = false
+  setOptions (newOptions: EditorConfigOptions): void {
+    // Here, we only trigger an update in the state itself. Then, we grab the
+    // update via an effect to ensure we can cache the final, correct
+    // configuration. However, in case there's no state (initial update), we
+    // still need to cache the config here, as the updateListener won't be
+    // firing yet.
 
-    if ('zettlr' in newOptions && 'render' in newOptions.zettlr) {
-      // If one of these options has changed from true to false, remove all
-      // markers below and have the remaining markers re-rendered afterwards.
-      const oldOpt = this._cmOptions.zettlr.render
-      const newOpt = newOptions.zettlr.render
+    // Cache the current config first, and then apply it
+    this.onConfigUpdate(newOptions)
 
-      for (const key in oldOpt) {
-        if (!(key in newOpt)) {
-          continue
-        }
+    this.config = safeAssign(newOptions, this.config)
 
-        if (oldOpt[key] === true && newOpt[key] === false) {
-          shouldRemoveMarkers = true
-          break
-        }
-      }
-    }
-
-    if (shouldRemoveMarkers) {
-      // If shouldRemoveMarkers is true, one of the rendering options has been
-      // disabled, so we must remove all markers and then re-render only those
-      // that should still be displayed.
-      const markers = this._instance.getAllMarks()
-      for (const marker of markers) {
-        marker.clear()
-      }
-    }
-
-    // Now, we can safely merge the options
-    this._cmOptions = safeAssign(newOptions, this._cmOptions)
-
-    // Next, set all options on the CodeMirror instance. This will internally
-    // fire all necessary events, apart from those we need to fire manually.
-    for (const name in this._cmOptions) {
-      if (name in this._cmOptions) {
-        (this._instance as any).setOption(name, this._cmOptions[name])
-      }
-    }
-
-    // Perform any after-option-setting-stuff
-    this._instance.setOption('extraKeys', generateKeymap())
-
-    // Clear the line indentation cache for the corresponding hook
-    clearLineIndentationCache()
+    this._instance.dispatch({ effects: configUpdateEffect.of(this.config) })
   }
 
   /**
-   * Returns an option with the given name
+   * This function is called by an updateListener that listens for changes to
+   * the main configuration. We do so to ensure that the editor state is the
+   * main source of truth, but that the editor class can cache the config in
+   * case we need to exchange the states.
    *
-   * @param   {String}  name  The name of the key to request
+   * @param   {Partial<EditorConfiguration>}  newOptions  The new options passed via the effect
+   */
+  private onConfigUpdate (newOptions: Partial<EditorConfiguration>): void {
+    const inputModeChanged = newOptions.inputMode !== undefined && newOptions.inputMode !== this.config.inputMode
+    const darkModeChanged = newOptions.darkMode !== undefined && newOptions.darkMode !== this.config.darkMode
+    const themeChanged = newOptions.theme !== undefined && newOptions.theme !== this.config.theme
+
+    // Third: The input mode, if applicable
+    if (inputModeChanged) {
+      if (newOptions.inputMode === 'emacs') {
+        this._instance.dispatch({ effects: inputModeCompartment.reconfigure(emacs()) })
+      } else if (newOptions.inputMode === 'vim') {
+        this._instance.dispatch({ effects: inputModeCompartment.reconfigure(vimPlugin()) })
+      } else {
+        this._instance.dispatch({ effects: inputModeCompartment.reconfigure([]) })
+      }
+    }
+
+    // Fourth: Switch theme, if applicable
+    if (darkModeChanged || themeChanged) {
+      const themes = getMainEditorThemes()
+
+      this._instance.dispatch({
+        effects: darkModeEffect.of({
+          darkMode: newOptions.darkMode,
+          ...themes[newOptions.theme ?? this.config.theme]
+        })
+      })
+    }
+  }
+
+  /**
+   * Returns an option with the given name as it is configured on the instance.
    *
-   * @return  {Mixed}         The value of the key
+   * @param   {string}  name  The name of the key to request
+   *
+   * @return  {any}           The value of the key
    */
   getOption (name: string): any {
-    return this._cmOptions[name]
-  }
-
-  /**
-   * Swaps the current CodeMirror Document with a new one
-   *
-   * @param   {Doc}     cmDoc         The CodeMirror document instance
-   * @param   {string}  documentMode  The mode to be associated with the editor
-   *
-   * @return  {Doc}                   The previous CodeMirror document instance
-   */
-  swapDoc (cmDoc: CodeMirror.Doc, documentMode: string): CodeMirror.Doc {
-    const oldDoc = this._instance.swapDoc(cmDoc)
-    this._instance.focus()
-
-    // Rarely, the heading classes will confuse the CodeMirror instance so that
-    // selections will still be of the old line height's size, instead of the
-    // new, bigger one. Since window resizing apparently helps, we'll manually
-    // call said function here (after a timeout to give the hooks time to run)
-    setTimeout(() => { this._instance.refresh() }, 1000)
-
-    this._currentDocumentMode = documentMode
-
-    if (!this.readabilityMode) {
-      this.setOptions({ mode: this._currentDocumentMode })
-    } else {
-      this.setOptions({ mode: 'readability' })
+    const config = this._instance.state.field(configField)
+    if (name in config) {
+      return config[name as keyof EditorConfiguration]
     }
-
-    return oldDoc
-  }
-
-  /**
-   * Whether the instance is currently considered "clean"
-   *
-   * @return  {Boolean}  True, if no changes are recorded
-   */
-  isClean (): boolean {
-    return this._instance.isClean()
   }
 
   /**
@@ -470,7 +591,37 @@ export default class MarkdownEditor extends EventEmitter {
    * @param   {String}  cmd  The command to run
    */
   runCommand (cmd: string): void {
-    this._instance.execCommand(cmd)
+    switch (cmd) {
+      case 'markdownComment':
+        applyComment(this._instance)
+        break
+      case 'markdownLink':
+        insertLink(this._instance)
+        break
+      case 'markdownImage':
+        insertImage(this._instance)
+        break
+      case 'insertFootnote':
+        addNewFootnote(this._instance)
+        break
+      case 'markdownMakeTaskList':
+        applyTaskList(this._instance)
+        break
+      default:
+        console.warn('Unimplemented command:', cmd)
+    }
+  }
+
+  /**
+   * Replaces the main selection with arbitrary text
+   *
+   * @param   {string}  text  The text to replace the selection with
+   */
+  replaceSelection (text: string): void {
+    const mainSel = this._instance.state.selection.main
+    this._instance.dispatch({
+      changes: { from: mainSel.from, to: mainSel.to, insert: text }
+    })
   }
 
   /**
@@ -481,36 +632,52 @@ export default class MarkdownEditor extends EventEmitter {
   }
 
   /**
+   * Whether the underlying Codemirror instance is currently focused
+   *
+   * @return  {boolean} The focus status
+   */
+  hasFocus (): boolean {
+    return this._instance.hasFocus
+  }
+
+  /**
+   * Sets the project info field of the editor state to the provided value.
+   *
+   * @param   {ProjectInfo|null}  info  The data
+   */
+  set projectInfo (info: ProjectInfo|null) {
+    this._instance.dispatch({ effects: projectInfoUpdateEffect.of(info) })
+  }
+
+  /**
    * Sets an autocomplete database of given type to a new value
    *
    * @param   {String}  type      The type of the database
    * @param   {Object}  database  The show-hint-addon compatible database
    */
+  setCompletionDatabase (type: 'tags', database: TagRecord[]): void
+  setCompletionDatabase (type: 'citations', database: Array<{ citekey: string, displayText: string }>): void
+  setCompletionDatabase (type: 'snippets', database: Array<{ name: string, content: string }>): void
+  setCompletionDatabase (type: 'files', database: Array<{ filename: string, displayName: string, id: string }>): void
   setCompletionDatabase (type: string, database: any): void {
-    setAutocompleteDatabase(type, database)
-  }
-
-  /**
-   * Updates the list of available snippets.
-   */
-  async updateSnippetAutocomplete (): Promise<void> {
-    const snippetList = await ipcRenderer.invoke('assets-provider', { command: 'list-snippets' })
-
-    const snippetsDB = []
-
-    for (const snippet of snippetList) {
-      const content = await ipcRenderer.invoke('assets-provider', {
-        command: 'get-snippet',
-        payload: { name: snippet }
-      })
-
-      snippetsDB.push({
-        displayText: snippet,
-        text: content
-      })
+    switch (type) {
+      case 'tags':
+        this.databaseCache.tags = database
+        this._instance.dispatch({ effects: tagsUpdate.of(database as TagRecord[]) })
+        break
+      case 'citations':
+        this.databaseCache.citations = database
+        this._instance.dispatch({ effects: citekeyUpdate.of(database as Array<{ citekey: string, displayText: string }>) })
+        break
+      case 'snippets':
+        this.databaseCache.snippets = database
+        this._instance.dispatch({ effects: snippetsUpdate.of(database as Array<{ name: string, content: string }>) })
+        break
+      case 'files':
+        this.databaseCache.files = database
+        this._instance.dispatch({ effects: filesUpdate.of(database as Array<{ filename: string, displayName: string, id: string }>) })
+        break
     }
-
-    this.setCompletionDatabase('snippets', snippetsDB)
   }
 
   /* * * * * * * * * * * *
@@ -522,8 +689,8 @@ export default class MarkdownEditor extends EventEmitter {
    *
    * @return {Array} An array containing objects with all headings
    */
-  get tableOfContents (): any[] {
-    return generateTableOfContents(this.value)
+  get tableOfContents (): ToCEntry[]|undefined {
+    return this._instance.state.field(tocField, false)
   }
 
   /**
@@ -531,68 +698,35 @@ export default class MarkdownEditor extends EventEmitter {
    *
    * @return  {Object}  An object containing, e.g., words, chars, selections.
    */
-  get documentInfo (): any {
-    const ret = {
-      words: this.wordCount,
-      chars: this.charCount,
-      chars_wo_spaces: this.charCountWithoutSpaces,
-      cursor: Object.assign({}, this._instance.getCursor()),
-      selections: [] as any[]
-    }
-
-    if (this._instance.somethingSelected()) {
-      // Write all selections into the file info object
-      let selectionText = this._instance.getSelections()
-      let selectionBounds = this._instance.listSelections()
-      for (let i = 0; i < selectionText.length; i++) {
-        ret.selections.push({
-          selectionLength: countWords(selectionText[i], this._countChars),
-          start: Object.assign({}, selectionBounds[i].anchor),
-          end: Object.assign({}, selectionBounds[i].head)
+  get documentInfo (): DocumentInfo {
+    // First, we need the main selection's main offset in the document and
+    // compute the correct line number for that offset, in order to arrive at
+    // a cursor position.
+    const mainOffset = this._instance.state.selection.main.head
+    const line = this._instance.state.doc.lineAt(mainOffset)
+    const ast = markdownToAST(this._instance.state.sliceDoc(), syntaxTree(this._instance.state))
+    return {
+      words: this.wordCount ?? 0,
+      chars: this.charCount ?? 0,
+      cursor: { line: line.number, ch: mainOffset - line.from + 1 }, // Chars are still zero-based
+      selections: this._instance.state.selection.ranges
+      // Remove cursor-only positions
+        .filter(sel => !sel.empty)
+        // Then map to user readable ranges
+        .map(sel => {
+          // Analogous to how we determine the cursor position we do it here for
+          // each selection present.
+          const anchorLine = this._instance.state.doc.lineAt(sel.anchor)
+          const headLine = this._instance.state.doc.lineAt(sel.head)
+          const { words, chars } = countAll(ast, sel.from, sel.to)
+          return {
+            anchor: { line: anchorLine.number, ch: sel.from - anchorLine.from + 1 },
+            head: { line: headLine.number, ch: sel.to - headLine.from + 1 },
+            words,
+            chars
+          }
         })
-      }
     }
-
-    return ret
-  }
-
-  /**
-   * Should the editor return char counts instead of word counts where appropriate?
-   *
-   * @param   {boolean}  shouldCountChars  The value
-   */
-  set countChars (shouldCountChars: boolean) {
-    this._countChars = shouldCountChars
-  }
-
-  /**
-   * Returns whether the editor returns char counts in appropriate places.
-   *
-   * @return  {boolean}  Whether the editor counts chars or words.
-   */
-  get countChars (): boolean {
-    return this._countChars
-  }
-
-  /**
-   * Whether the editor is in fullscreen mode
-   *
-   * @return  {Boolean}  True if the editor option for fullScreen is set
-   */
-  get isFullscreen (): boolean {
-    return this._cmOptions.fullScreen
-  }
-
-  /**
-   * Enters or exits the editor fullscreen mode
-   *
-   * @param   {Boolean}  shouldBeFullscreen  Whether the editor should be in fullscreen
-   */
-  set isFullscreen (shouldBeFullscreen: boolean) {
-    this.setOptions({ 'fullScreen': shouldBeFullscreen })
-
-    // Refresh to reflect the size changes
-    this._instance.refresh()
   }
 
   /**
@@ -601,7 +735,7 @@ export default class MarkdownEditor extends EventEmitter {
    * @return  {Boolean}  True if typewriter mode is active
    */
   get hasTypewriterMode (): boolean {
-    return this._cmOptions.zettlr.typewriterMode
+    return this.config.typewriterMode
   }
 
   /**
@@ -610,7 +744,10 @@ export default class MarkdownEditor extends EventEmitter {
    * @param   {Boolean}  shouldBeTypewriter  True or False
    */
   set hasTypewriterMode (shouldBeTypewriter: boolean) {
-    this.setOptions({ 'zettlr': { 'typewriterMode': shouldBeTypewriter } })
+    this.config.typewriterMode = shouldBeTypewriter
+    this._instance.dispatch({
+      effects: configUpdateEffect.of({ typewriterMode: shouldBeTypewriter })
+    })
   }
 
   /**
@@ -619,7 +756,7 @@ export default class MarkdownEditor extends EventEmitter {
    * @return  {boolean}  True or false
    */
   get distractionFree (): boolean {
-    return this._cmOptions.fullScreen
+    return this._instance.state.field(configField, false)?.distractionFree ?? false
   }
 
   /**
@@ -628,13 +765,6 @@ export default class MarkdownEditor extends EventEmitter {
    * @param   {boolean}  shouldBeFullscreen  Whether the editor should be in distraction free
    */
   set distractionFree (shouldBeFullscreen: boolean) {
-    this.setOptions({ fullScreen: shouldBeFullscreen })
-
-    if (this.distractionFree) {
-      this._instance.getWrapperElement().classList.add('CodeMirror-fullscreen')
-    } else {
-      this._instance.getWrapperElement().classList.remove('CodeMirror-fullscreen')
-    }
   }
 
   /**
@@ -643,7 +773,7 @@ export default class MarkdownEditor extends EventEmitter {
    * @return  {boolean}  True if the readability mode is active
    */
   get readabilityMode (): boolean {
-    return this._readabilityMode
+    return this._instance.state.field(configField).readabilityMode
   }
 
   /**
@@ -652,47 +782,8 @@ export default class MarkdownEditor extends EventEmitter {
    * @param   {boolean}  shouldBeReadability  Whether or not the mode should be active
    */
   set readabilityMode (shouldBeReadability: boolean) {
-    if (shouldBeReadability && !this._readabilityMode) {
-      // Switch to readability
-      this.setOptions({ 'mode': 'readability' })
-      this._readabilityMode = true
-    } else if (!shouldBeReadability && this._readabilityMode) {
-      // Switch off from readability
-      this.setOptions({ 'mode': this._currentDocumentMode })
-      this._readabilityMode = false
-    }
-  }
-
-  /**
-   * Whether the instance is currently readonly
-   *
-   * @return  {Boolean}  True if users cannot edit the contents
-   */
-  get readOnly (): boolean {
-    return this._cmOptions.readOnly
-  }
-
-  /**
-   * Sets the readonly flag on the instance
-   *
-   * @param   {Boolean}  shouldBeReadonly  Whether the editor contents should be readonly
-   */
-  set readOnly (shouldBeReadonly: boolean) {
-    // Make sure we only set readOnly if the state has changed to prevent any
-    // lag due to the setOptions handler taking quite some time.
-    if (this.readOnly === shouldBeReadonly) {
-      return
-    }
-
-    this.setOptions({ readOnly: shouldBeReadonly })
-
-    // Set a special class to indicate not that it's an empty document,
-    // but rather that none is open atm
-    if (shouldBeReadonly) {
-      this._instance.getWrapperElement().classList.add('CodeMirror-readonly')
-    } else {
-      this._instance.getWrapperElement().classList.remove('CodeMirror-readonly')
-    }
+    this.config.readabilityMode = shouldBeReadability
+    this._instance.dispatch({ effects: configUpdateEffect.of(this.config) })
   }
 
   /**
@@ -701,7 +792,16 @@ export default class MarkdownEditor extends EventEmitter {
    * @return  {String}  The editor contents
    */
   get value (): string {
-    return this._instance.getValue()
+    return [...this._instance.state.doc.iterLines()].join('\n')
+  }
+
+  /**
+   * Returns the outer DOM element for the editor instance
+   *
+   * @return  {HTMLElement}The editor wrapper
+   */
+  get dom (): HTMLElement {
+    return this._instance.dom
   }
 
   /**
@@ -709,8 +809,8 @@ export default class MarkdownEditor extends EventEmitter {
    *
    * @return  {Number}  The word count
    */
-  get wordCount (): number {
-    return countWords(this.value, false)
+  get wordCount (): number|undefined {
+    return this._instance.state.field(countField, false)?.words
   }
 
   /**
@@ -718,25 +818,25 @@ export default class MarkdownEditor extends EventEmitter {
    *
    * @return  {Number}  The number of characters
    */
-  get charCount (): number {
-    return countWords(this.value, true)
+  get charCount (): number|undefined {
+    return this._instance.state.field(countField, false)?.chars
   }
 
   /**
-   * Return the amount of characters without spaces
+   * Returns the underlying Codemirror instance
    *
-   * @return  {Number}  The number of chars without spaces
+   * @return  {EditorView}  The instance
    */
-  get charCountWithoutSpaces (): number {
-    return countWords(this.value.replace(/ +/g, ''), true)
-  }
-
-  /**
-   * Returns the underlying CodeMirror instance
-   *
-   * @return  {CodeMirror.Editor}  The CodeMirror instance
-   */
-  get codeMirror (): CodeMirror.Editor {
+  get instance (): EditorView {
     return this._instance
+  }
+
+  /**
+   * Retrieves the document represented by this editor instance.
+   *
+   * @return  {string}  the absolute path to the document.
+   */
+  get documentPath (): string {
+    return this.representedDocument
   }
 }

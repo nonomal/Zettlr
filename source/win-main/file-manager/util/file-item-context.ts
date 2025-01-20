@@ -14,22 +14,25 @@
 
 import { trans } from '@common/i18n-renderer'
 import showPopupMenu from '@common/modules/window-register/application-menu-helper'
-import { CodeFileMeta, MDFileMeta } from '@dts/common/fsal'
-import { AnyMenuItem } from '@dts/renderer/context'
+import type { CodeFileDescriptor, MDFileDescriptor } from '@dts/common/fsal'
+import type { AnyMenuItem } from '@dts/renderer/context'
+import type { WindowControlsIPCAPI } from 'source/app/service-providers/windows'
 
 const ipcRenderer = window.ipc
-const clipboard = window.clipboard
 
-export default function displayFileContext (event: MouseEvent, fileObject: MDFileMeta|CodeFileMeta, el: HTMLElement, callback: any): void {
+export function displayFileContext (event: MouseEvent, fileObject: MDFileDescriptor|CodeFileDescriptor, el: HTMLElement, callback: (clickedID: string) => void): void {
+  const isMac = process.platform === 'darwin'
+  const isWin = process.platform === 'win32'
+
   const template: AnyMenuItem[] = [
     {
-      label: trans('menu.open_new_tab'),
+      label: trans('Open in a new tab'),
       id: 'new-tab',
       type: 'normal',
       enabled: true
     },
     {
-      label: trans('menu.properties'),
+      label: trans('Properties'),
       id: 'properties',
       type: 'normal',
       enabled: true
@@ -38,21 +41,21 @@ export default function displayFileContext (event: MouseEvent, fileObject: MDFil
       type: 'separator'
     },
     {
-      label: trans('menu.rename_file'),
+      label: trans('Rename file'),
       id: 'menu.rename_file',
       accelerator: 'CmdOrCtrl+R',
       type: 'normal',
       enabled: true
     },
     {
-      label: trans('menu.delete_file'),
+      label: trans('Delete file'),
       id: 'menu.delete_file',
       accelerator: 'CmdOrCtrl+Backspace',
       type: 'normal',
       enabled: true
     },
     {
-      label: trans('menu.duplicate_file'),
+      label: trans('Duplicate file'),
       id: 'menu.duplicate_file',
       type: 'normal',
       enabled: true
@@ -61,41 +64,41 @@ export default function displayFileContext (event: MouseEvent, fileObject: MDFil
       type: 'separator'
     },
     {
-      label: trans('menu.copy_filename'),
+      label: trans('Copy path'),
+      id: 'menu.copy_path',
+      type: 'normal',
+      enabled: true
+    },
+    {
+      label: trans('Copy filename'),
       id: 'menu.copy_filename',
       type: 'normal',
       enabled: true
     },
     {
-      label: trans('menu.copy_id'),
+      label: trans('Copy ID'),
       id: 'menu.copy_id',
       type: 'normal',
       enabled: fileObject.type === 'file' && fileObject.id !== ''
     },
     {
-      label: trans('menu.quicklook'),
-      id: 'menu.quicklook',
-      type: 'normal',
-      enabled: true
-    },
-    {
       type: 'separator'
     },
     {
-      label: trans('menu.show_file'),
+      label: isMac ? trans('Reveal in Finder') : isWin ? trans('Reveal in Explorer') : trans('Reveal in File Browser'),
       id: 'menu.show_file',
       type: 'normal',
       enabled: true
     }
   ]
 
-  if (fileObject.parent == null) {
+  if (fileObject.root) {
     template.push(
       { type: 'separator' },
       {
         id: 'menu.close_file',
         type: 'normal',
-        label: trans('menu.close_file'),
+        label: trans('Close file'),
         enabled: true
       })
   }
@@ -105,18 +108,21 @@ export default function displayFileContext (event: MouseEvent, fileObject: MDFil
     callback(clickedID) // TODO
     switch (clickedID) {
       case 'menu.copy_filename':
-        clipboard.writeText(fileObject.name)
+        navigator.clipboard.writeText(fileObject.name).catch(err => console.error(err))
+        break
+      case 'menu.copy_path':
+        navigator.clipboard.writeText(fileObject.path).catch(err => console.error(err))
         break
       case 'menu.copy_id':
         if (fileObject.type === 'file') {
-          clipboard.writeText(fileObject.id)
+          navigator.clipboard.writeText(fileObject.id).catch(err => console.error(err))
         }
         break
       case 'menu.show_file':
         ipcRenderer.send('window-controls', {
           command: 'show-item-in-folder',
-          payload: fileObject.path
-        })
+          payload: { itemPath: fileObject.path }
+        } as WindowControlsIPCAPI)
         break
     }
   })

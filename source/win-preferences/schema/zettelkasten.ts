@@ -13,77 +13,100 @@
  */
 
 import { trans } from '@common/i18n-renderer'
+import { type PreferencesFieldset } from '../App.vue'
+import { PreferencesGroups } from './_preferences-groups'
+import type { ConfigOptions } from 'source/app/service-providers/config/get-config-template'
 
-export default function (): any {
-  return {
-    fieldsets: [
-      [
+export function getZettelkastenFields (config: ConfigOptions): PreferencesFieldset[] {
+  return [
+    {
+      title: trans('Zettelkasten IDs'),
+      group: PreferencesGroups.Zettelkasten,
+      help: undefined, // TODO
+      fields: [
         {
           type: 'text',
-          label: trans('dialog.preferences.zkn.id_label'),
+          label: trans('Pattern for Zettelkasten IDs'),
+          info: trans('Uses ECMAScript regular expressions'),
           model: 'zkn.idRE',
           reset: '(\\d{14})' // Default enables the reset button
         },
         {
           type: 'text',
-          label: trans('dialog.preferences.zkn.linkstart_label'),
-          model: 'zkn.linkStart',
-          reset: '[['
-        },
-        {
-          type: 'text',
-          label: trans('dialog.preferences.zkn.linkend_label'),
-          model: 'zkn.linkEnd',
-          reset: ']]'
-        },
-        {
-          type: 'text',
-          label: trans('dialog.preferences.zkn.id_generator_label'),
+          label: trans('Pattern used to generate new IDs'),
           model: 'zkn.idGen',
           reset: '%Y%M%D%h%m%s',
-          info: 'Variables: %Y, %y, %M, %D, %W, %h, %m, %s, %X, %uuid4'
+          info: trans('Available Variables: %s', '%Y, %y, %M, %D, %W, %h, %m, %s, %o, %X, %uuid4')
         }
-      ],
-      [
-        {
-          type: 'fieldset-label', // TODO: Create this type
-          text: trans('dialog.preferences.export.stripping')
-        },
+      ]
+    },
+    {
+      title: trans('Internal links'),
+      group: PreferencesGroups.Zettelkasten,
+      help: undefined, // TODO
+      fields: [
         {
           type: 'checkbox',
-          label: 'Link with filename only',
+          label: trans('Link with filename only'),
           model: 'zkn.linkFilenameOnly'
         },
         {
           type: 'radio',
-          label: trans('dialog.preferences.zkn.link_behaviour_description'),
+          label: trans('When linking files, add the document name …'),
           model: 'zkn.linkWithFilename',
           options: {
-            'always': trans('dialog.preferences.zkn.link_behaviour_always'),
-            'withID': trans('dialog.preferences.zkn.link_behaviour_id'),
-            'never': trans('dialog.preferences.zkn.link_behaviour_never')
+            always: trans('Always'),
+            withID: trans('Only when linking using the ID'),
+            never: trans('Never')
           },
-          disabled: window.config.get('zkn.linkFilenameOnly') === true
-        }
-      ],
-      [
+          disabled: config.zkn.linkFilenameOnly
+        },
+        { type: 'separator' },
         {
-          type: 'checkbox',
-          label: trans('dialog.preferences.zkn.auto_search'),
-          model: 'zkn.autoSearch'
+          type: 'form-text',
+          display: 'sub-heading',
+          contents: trans('Link format')
+        },
+        {
+          type: 'form-text',
+          display: 'info',
+          contents: trans('Internal links allow you to add an optional title, separated by a vertical bar character from the actual link target. Here you can define the ordering of the two.')
+        },
+        {
+          type: 'radio',
+          model: 'zkn.linkFormat',
+          options: {
+            'link|title': trans('[[Link|Title]]: Link first (recommended)'),
+            'title|link': trans('[[Title|Link]]: Title first')
+          }
+        },
+        {
+          type: 'separator'
         },
         {
           type: 'checkbox',
-          label: trans('dialog.preferences.zkn.auto_create_file'),
-          model: 'zkn.autoCreateLinkedFiles'
+          label: trans('Start a full-text search when following internal links'),
+          info: trans('The search string will match the content between the brackets: [[ ]].'),
+          model: 'zkn.autoSearch'
+        },
+        { type: 'separator' },
+        {
+          type: 'form-text',
+          display: 'sub-heading',
+          contents: trans('Automatically create non-existing files in this folder when following internal links')
+        },
+        {
+          type: 'form-text',
+          display: 'info',
+          contents: trans('For this to work, the folder must be open as a Workspace in Zettlr.')
         },
         {
           type: 'directory',
-          label: trans('dialog.preferences.zkn.custom_directory'),
           model: 'zkn.customDirectory',
+          placeholder: trans('Path to folder'),
           reset: ''
         }
       ]
-    ]
-  }
+    }
+  ]
 }

@@ -23,29 +23,50 @@ import { promises as fs } from 'fs'
 import isFile from '@common/util/is-file'
 
 // Exporters
-import { DefaultsOverride, ExporterAPI, ExporterOptions, ExporterOutput, PandocRunnerOutput } from './types'
+import type { DefaultsOverride, ExporterAPI, ExporterOptions, ExporterOutput, PandocRunnerOutput } from './types'
 import { plugin as DefaultExporter } from './default-exporter'
 import { plugin as PDFExporter } from './pdf-exporter'
-import { plugin as RevealJSExporter } from './revealjs-exporter'
 import { plugin as TextbundleExporter } from './textbundle-exporter'
-import AssetsProvider from '@providers/assets'
+import type AssetsProvider from '@providers/assets'
+import type LogProvider from '@providers/log'
+import { type PandocProfileMetadata } from '@providers/assets'
+import type ConfigProvider from '@providers/config'
 
-const PLUGINS = [
-  DefaultExporter,
-  PDFExporter,
-  RevealJSExporter,
-  TextbundleExporter
-]
+/**
+ * This function returns faux metadata for the custom export formats the
+ * exporter supports which circumvent (or build upon) the Pandoc exporter. These
+ * are not defined as regular defaults files, therefore we need to output them
+ * here.
+ *
+ * @return  {PandocProfileMetadata[]}The additional profiles
+ */
+export function getCustomProfiles (): PandocProfileMetadata[] {
+  return [
+    {
+      name: 'Textbundle.yaml', // Fake name
+      reader: 'markdown', // Not completely the truth
+      writer: 'textbundle', // Not even supported by Pandoc
+      isInvalid: false // IT'S ALL FAKE!
+    },
+    {
+      name: 'Textpack.yaml',
+      reader: 'markdown',
+      writer: 'textpack',
+      isInvalid: false
+    },
+    {
+      name: 'Simple PDF.yaml',
+      reader: 'markdown',
+      writer: 'simple-pdf',
+      isInvalid: false
+    }
+  ]
+}
 
-export function getAvailableFormats (): any {
-  // Returns simply a list of all available formats
-  const list = []
-
-  for (const plugin of PLUGINS) {
-    list.push(plugin.pluginInformation())
-  }
-
-  return list
+const PLUGINS = {
+  pandoc: DefaultExporter,
+  'simple-pdf': PDFExporter,
+  textbundle: TextbundleExporter
 }
 
 /**
@@ -58,45 +79,38 @@ export function getAvailableFormats (): any {
  */
 export async function makeExport (
   options: ExporterOptions,
+  logger: LogProvider,
   config: ConfigProvider,
-  assets: AssetsProvider,
-  formatOptions: any = {}
+  assets: AssetsProvider
 ): Promise<ExporterOutput> {
   // We already know where the exported file will end up, so set the property
-
-  // Now we can prepare our return
-  let exporterReturn: ExporterOutput = {
-    code: 6, // See https://pandoc.org/MANUAL.html#exit-codes
-    stdout: [],
-    stderr: [],
-    targetFile: '' // This will be returned if no exporter has been found
-  }
-
   const inputFiles = options.sourceFiles.map(file => file.path)
 
   // This is basically the "plugin API"
   const ctx: ExporterAPI = {
     runPandoc: async (defaults: string) => {
-      return await runPandoc(defaults, options.cwd)
+      return await runPandoc(logger, defaults, options.cwd)
     },
-    getDefaultsFor: async (writer: string, properties: any) => {
-      return await writeDefaults(writer, properties, config, assets, options.defaultsOverride)
+    writeDefaults: async (filename: string, overrides: any = {}) => {
+      return await writeDefaults(filename, overrides, config, assets, options.defaultsOverride)
+    },
+    listDefaults: async () => {
+      return await assets.listDefaults()
     }
   }
 
-  // Search for the correct plugin to run, and run it
-  for (const plugin of PLUGINS) {
-    const formats = plugin.pluginInformation().formats
-    if (options.format in formats) {
-      exporterReturn = await plugin.run(options, inputFiles, formatOptions, ctx)
-      break
-    }
+  // Search for the correct plugin to run, and run it. First the custom ones ...
+  if ([ 'textbundle', 'textpack' ].includes(options.profile.writer)) {
+    return await PLUGINS.textbundle(options, inputFiles, ctx)
+  } else if (options.profile.writer === 'simple-pdf') {
+    return await PLUGINS['simple-pdf'](options, inputFiles, ctx)
+  } else {
+    // ... otherwise run the regular Pandoc exporter.
+    return await PLUGINS.pandoc(options, inputFiles, ctx)
   }
-
-  return exporterReturn
 }
 
-async function runPandoc (defaultsFile: string, cwd?: string): Promise<PandocRunnerOutput> {
+async function runPandoc (logger: LogProvider, defaultsFile: string, cwd?: string): Promise<PandocRunnerOutput> {
   const output: PandocRunnerOutput = {
     code: 0,
     stdout: [],
@@ -108,7 +122,7 @@ async function runPandoc (defaultsFile: string, cwd?: string): Promise<PandocRun
       // NOTE: This has to be true, because of reasons unbeknownst to me, Pandoc
       // is unable to open the defaultsFile if it is not run from within a shell
       shell: true,
-      cwd: cwd
+      cwd
     })
 
     pandocProcess.stdout.on('data', (data) => {
@@ -119,7 +133,7 @@ async function runPandoc (defaultsFile: string, cwd?: string): Promise<PandocRun
       output.stderr.push(String(data))
     })
 
-    pandocProcess.on('close', (code: number, signal) => {
+    pandocProcess.on('close', (code: number, _signal) => {
       // Code should be 0. To check for errors, check that
       output.code = code
       resolve()
@@ -136,37 +150,38 @@ async function runPandoc (defaultsFile: string, cwd?: string): Promise<PandocRun
   output.stderr = output.stderr.join('').split('\n').filter(line => line.trim() !== '')
   output.stdout = output.stdout.join('').split('\n').filter(line => line.trim() !== '')
 
+  if (output.stdout.length > 0) {
+    logger.info('This Pandoc run produced additional output.', output.stdout)
+  }
+
   return output
 }
 
 // REFERENCE: Full defaults file here: https://pandoc.org/MANUAL.html#default-files
 
 async function writeDefaults (
-  writer: string, // The writer to use (e.g. html or pdf)
+  filename: string, // The profile to use
   properties: any, // Contains properties that will be written to the defaults
   config: ConfigProvider,
   assets: AssetsProvider,
   defaultsOverride?: DefaultsOverride
 ): Promise<string> {
-  const dataDir = app.getPath('temp')
-  const defaultsFile = path.join(dataDir, 'defaults.yml')
-
-  const defaults: any = await assets.getDefaultsFor(writer, 'export')
+  const defaultsFile = path.join(app.getPath('temp'), 'defaults.yml')
+  const defaults: any = await assets.getDefaultsFile(filename)
+  const { cslLibrary, cslStyle, stripTags, stripLinks } = config.get().export
 
   // In order to facilitate file-only databases, we need to get the currently
   // selected database. This could break in a lot of places, but until Pandoc
   // respects a file-defined bibliography, this is our best shot.
   // const bibliography = global.citeproc.getSelectedDatabase()
-  const bibliography: string = config.get('export.cslLibrary')
-  if (bibliography !== undefined && isFile(bibliography)) {
+  if (isFile(cslLibrary)) {
     if ('bibliography' in defaults) {
-      defaults.bibliography.push(bibliography)
+      defaults.bibliography.push(cslLibrary)
     } else {
-      defaults.bibliography = [bibliography]
+      defaults.bibliography = [cslLibrary]
     }
   }
 
-  const cslStyle: string = config.get('export.cslStyle')
   if (defaultsOverride?.csl !== undefined && isFile(defaultsOverride.csl)) {
     defaults.csl = defaultsOverride.csl
   } else if (isFile(cslStyle)) {
@@ -185,10 +200,8 @@ async function writeDefaults (
     defaults.metadata.zettlr = {}
   }
 
-  defaults.metadata.zettlr.strip_tags = Boolean(config.get('export.stripTags'))
-  defaults.metadata.zettlr.strip_links = String(config.get('export.stripLinks'))
-  defaults.metadata.zettlr.link_start = String(config.get('zkn.linkStart'))
-  defaults.metadata.zettlr.link_end = String(config.get('zkn.linkEnd'))
+  defaults.metadata.zettlr.strip_tags = stripTags
+  defaults.metadata.zettlr.strip_links = stripLinks
 
   // Potentially override allowed defaults properties
   if (defaultsOverride?.title !== undefined) {
@@ -213,7 +226,7 @@ async function writeDefaults (
     defaults[key] = properties[key]
   }
 
-  const YAMLOptions: YAML.Options = {
+  const YAMLOptions = {
     indent: 4,
     simpleKeys: false
   }

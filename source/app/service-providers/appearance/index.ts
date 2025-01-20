@@ -13,12 +13,13 @@
  * END HEADER
  */
 
+import type ConfigProvider from '@providers/config'
 import {
   ipcMain,
   nativeTheme,
   systemPreferences
 } from 'electron'
-import LogProvider from '../log'
+import type LogProvider from '../log'
 import ProviderContract from '../provider-contract'
 
 /**
@@ -34,21 +35,21 @@ export default class AppearanceProvider extends ProviderContract {
   private _startMin: number
   private _endHour: number
   private _endMin: number
+  private _tickInterval: NodeJS.Timeout
 
   /**
    * Create the instance on program start and initially load the settings.
    */
   constructor (private readonly _logger: LogProvider, private readonly _config: ConfigProvider) {
     super()
-    this._logger.verbose('Appearance provider booting up ...')
     // Possible modes:
     // - off: Do nothing in here
     // - schedule: Ask the clock when to switch
     // - system: Listen to mode changes based on the operating system (macOS and Windows, some Linux distributions)
 
     // Initiate everything
-    this._mode = this._config.get('autoDarkMode')
-    this._scheduleWasDark = this._isItDark() // Preset where we currently are
+    this._mode = 'off'
+    this._scheduleWasDark = false
 
     // The TypeScript linter is not clever enough to see that the function will
     // definitely set the initial values ...
@@ -56,7 +57,6 @@ export default class AppearanceProvider extends ProviderContract {
     this._startMin = 0
     this._endHour = 0
     this._endMin = 0
-    this._recalculateSchedule() // Parse the start and end times
 
     /**
      * Subscribe to the updated-event in order to determine when the underlying
@@ -76,22 +76,6 @@ export default class AppearanceProvider extends ProviderContract {
       }
     })
 
-    // Initially set the dark mode after startup, if the mode is set to "system"
-    if (this._mode === 'system') {
-      this._config.set('darkMode', nativeTheme.shouldUseDarkColors)
-    } else if (process.platform === 'darwin') {
-      // Override the app level appearance immediately
-      systemPreferences.appLevelAppearance = (this._config.get('darkMode') === true) ? 'dark' : 'light'
-    }
-
-    // It may be that it was already dark when the user started the app, but the
-    // theme was light. This makes sure the theme gets set once after application
-    // start --- But if the user decides to change it back, it'll not be altered.
-    if (this._mode === 'schedule' && this._config.get('darkMode') !== this._isItDark()) {
-      this._config.set('darkMode', this._isItDark())
-      this._scheduleWasDark = this._isItDark()
-    }
-
     // Subscribe to configuration updates
     this._config.on('update', (option: string) => {
       // Set internal vars accordingly
@@ -101,20 +85,18 @@ export default class AppearanceProvider extends ProviderContract {
         this._recalculateSchedule()
       } else if (option === 'darkMode' && process.platform === 'darwin') {
         const shouldBeDark = nativeTheme.shouldUseDarkColors
-        const isDark = Boolean(this._config.get('darkMode'))
+        const isDark = this._config.get().darkMode
         if (shouldBeDark !== isDark) {
           // Explicitly set the appLevelAppearance in case the internal theme
           // differs from the operating system.
-          systemPreferences.appLevelAppearance = (isDark) ? 'dark' : 'light'
+          nativeTheme.themeSource = (isDark) ? 'dark' : 'light'
         } else {
-          // DEBUG: See issue https://github.com/electron/electron/issues/30413
-          // @ts-expect-error
-          systemPreferences.appLevelAppearance = null
+          nativeTheme.themeSource = 'system'
         }
       }
     })
 
-    ipcMain.handle('appearance-provider', (event, { command, payload }) => {
+    ipcMain.handle('appearance-provider', (event, { command }) => {
       // This command returns the accent colour including a contrast colour to be used
       // as the opposite colour, if a good visible contrast is wished for.
       if (command === 'get-accent-color') {
@@ -156,38 +138,61 @@ export default class AppearanceProvider extends ProviderContract {
         }
       }
     })
+  }
 
-    this.tick() // Begin the tick
+  public async boot (): Promise<void> {
+    this._logger.verbose('Appearance provider booting up ...')
+
+    this._recalculateSchedule() // Parse the start and end times
+    this._mode = this._config.get().autoDarkMode
+    this._scheduleWasDark = this._isItDark() // Preset where we currently are
+
+    // Initially set the dark mode after startup, if the mode is set to "system"
+    if (this._mode === 'system') {
+      this._config.set('darkMode', nativeTheme.shouldUseDarkColors)
+    } else if (process.platform === 'darwin') {
+      // Override the app level appearance immediately
+      nativeTheme.themeSource = this._config.get().darkMode ? 'dark' : 'light'
+    }
+
+    // It may be that it was already dark when the user started the app, but the
+    // theme was light. This makes sure the theme gets set once after application
+    // start --- But if the user decides to change it back, it'll not be altered.
+    if (this._mode === 'schedule' && this._config.get().darkMode !== this._isItDark()) {
+      this._config.set('darkMode', this._isItDark())
+      this._scheduleWasDark = this._isItDark()
+    }
+
+    this._tickInterval = setInterval(() => { this.tick() }, 1000)
   }
 
   tick (): void {
-    if (this._mode === 'schedule') {
-      // By tracking the status of the time, we avoid annoying people by forcing
-      // the dark or light theme even if they decide to change it later on. This
-      // time Zettlr will only trigger a theme change if we traversed from
-      // daytime to nighttime, and leave out the question of whether or not dark
-      // mode has been active or not.
-      if (this._scheduleWasDark !== this._isItDark()) {
-        // The schedule just changed -> change the theme
-        const mode = (this._isItDark()) ? 'dark' : 'light'
-        this._logger.info('Switching appearance to ' + mode)
-
-        this._config.set('darkMode', this._isItDark())
-        this._scheduleWasDark = this._isItDark()
-      }
+    if (this._mode !== 'schedule') {
+      return
     }
-    // Have a tick (tac)
-    setTimeout(() => {
-      this.tick()
-    }, 1000)
+
+    // By tracking the status of the time, we avoid annoying people by forcing
+    // the dark or light theme even if they decide to change it later on. This
+    // time Zettlr will only trigger a theme change if we traversed from
+    // daytime to nighttime, and leave out the question of whether or not dark
+    // mode has been active or not.
+    if (this._scheduleWasDark !== this._isItDark()) {
+      // The schedule just changed -> change the theme
+      const mode = (this._isItDark()) ? 'dark' : 'light'
+      this._logger.info('Switching appearance to ' + mode)
+
+      this._config.set('darkMode', this._isItDark())
+      this._scheduleWasDark = this._isItDark()
+    }
   }
 
   /**
    * Parses the current auto dark mode start and end times for quick access.
    */
   _recalculateSchedule (): void {
-    let start = this._config.get('autoDarkModeStart').split(':')
-    let end = this._config.get('autoDarkModeEnd').split(':')
+    const { autoDarkModeStart, autoDarkModeEnd } = this._config.get()
+    const start = autoDarkModeStart.split(':')
+    const end = autoDarkModeEnd.split(':')
 
     this._startHour = parseInt(start[0], 10)
     this._startMin = parseInt(start[1], 10)
@@ -234,5 +239,6 @@ export default class AppearanceProvider extends ProviderContract {
    */
   async shutdown (): Promise<void> {
     this._logger.verbose('Appearance provider shutting down ...')
+    clearInterval(this._tickInterval)
   }
 }

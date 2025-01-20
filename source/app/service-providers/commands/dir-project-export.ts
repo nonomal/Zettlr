@@ -15,10 +15,25 @@
 import ZettlrCommand from './zettlr-command'
 import objectToArray from '@common/util/object-to-array'
 import { makeExport } from './exporter'
-import { filter as minimatch } from 'minimatch'
-import { shell } from 'electron'
-import { ExporterOptions } from './exporter/types'
-import LogProvider from '@providers/log'
+import { shell, dialog } from 'electron'
+import type { ExporterOptions } from './exporter/types'
+import type LogProvider from '@providers/log'
+import { trans } from '@common/i18n-main'
+import { runShellCommand } from './exporter/run-shell-command'
+import { showNativeNotification } from '@common/util/show-notification'
+import type { AnyDescriptor } from 'source/types/common/fsal'
+import path from 'path'
+
+/**
+ * Converts a path fragment to use Windows path separators by replacing / with \
+ *
+ * @param   {string}  pathFragment  The path fragment
+ *
+ * @return  {string}                The path fragment using Windows conventions.
+ */
+function pathToWin (pathFragment: string): string {
+  return pathFragment.replace(/\//g, '\\')
+}
 
 export default class DirProjectExport extends ZettlrCommand {
   constructor (app: any) {
@@ -32,85 +47,130 @@ export default class DirProjectExport extends ZettlrCommand {
     */
   async run (evt: string, arg: any): Promise<boolean> {
     // First get the directory
-    const dir = this._app.fsal.findDir(arg)
+    const dir = this._app.workspaces.findDir(arg)
 
-    if (dir === null) {
+    if (dir === undefined) {
       this._app.log.error('Could not export project: Directory not found.')
       return false
     }
 
-    const config = dir._settings.project
+    const config = dir.settings.project
 
     if (config === null) {
       this._app.log.error(`Could not export project: Directory ${dir.name} is not a project.`)
       return false
     }
 
-    // Receive a two dimensional array of all directory contents and remove all
-    // directories as well as any non-code/MD file
-    let files = objectToArray(dir, 'children').filter(e => e.type !== 'directory' && e.type !== 'other')
+    // Now, we have to retrieve the files. We have a directory descriptor that
+    // contains a list of existing files on disk, and we have a project config
+    // that specifies files and a sorting for export. We need to check that all
+    // files specified in the config still exist. If a file is missing, display
+    // a warning but export anyway.
+    const availableFiles = objectToArray<AnyDescriptor>(dir, 'children').filter(e => e.type !== 'directory' && e.type !== 'other').map(e => e.path)
 
-    // Use minimatch to filter against the project's filter patterns
-    for (const pattern of config.filters) {
-      this._app.log.info(`[Project] Filtering fileset: Matching against "${pattern}"`)
-      // NOTE: minimatch is actually just the "filter" function
-      const match = minimatch(pattern, { matchBase: true })
-      // NOTE: Since we're dealing with descriptors, and not paths, we have to
-      // manually call the filter function providing the path-property rather
-      // than the full object.
-      files = files.filter((descriptor, index, arr) => match(descriptor.path, index, arr))
+    // Since the config.files array already includes relative paths, we
+    // basically just have to make them absolute relative to the directory and
+    // ensure those paths exist in availableFiles.
+    const existingFilesWithSorting = config.files
+      // Since we default to always using Unix paths, to make the magic work on
+      // Windows, we here have to map the relative paths in the project config
+      // (back) to the Windows conventions by replacing / with \\.
+      .map(file => process.platform === 'win32' ? pathToWin(file) : file)
+      .map(file => path.join(dir.path, file))
+      .filter(file => availableFiles.includes(file))
+
+    if (existingFilesWithSorting.length === 0) {
+      this._app.log.warning('[Project] Aborting project export: No files to export')
+      dialog.showErrorBox(
+        trans('Cannot export project'),
+        trans('There are no files selected for export. Please select files to be included in the project settings.')
+      )
+      return false // Cannot export
+    } else if (existingFilesWithSorting.length !== config.files.length) {
+      await dialog.showMessageBox({
+        title: trans('Project File Mismatch'),
+        message: trans('One or more files specified in the project settings have not been found. They may have moved or been deleted. Please verify that all files that you would like to export are included.'),
+        buttons: [trans('Ok')]
+      }) // Don't return, because we still can export
     }
 
-    if (files.length === 0) {
-      this._app.log.warning('[Project] Aborting export: No files remained after filtering.')
-      return false
-    }
+    const allDefaults = await this._app.assets.listDefaults()
 
-    for (const format of config.formats) {
+    for (const profilePathOrCommand of config.profiles) {
       // Spin up one exporter per format.
-      this._app.log.info(`[Project] Exporting ${dir.name} as ${format}.`)
+      const profile = allDefaults.find(e => e.name === profilePathOrCommand)
+      const command = this._app.config.get().export.customCommands.find(c => c.command === profilePathOrCommand)
+
+      if (profile === undefined && command === undefined) {
+        this._app.log.warning(`Could not export project ${dir.name} using profile or command ${profilePathOrCommand}: Not found`)
+        continue
+      }
+
+      // Now check if it's actually a custom export because that will be pretty
+      // much easier than the regular exports.
+      if (command !== undefined) {
+        this._app.log.info(`[Project] Exporting ${dir.name} using custom command ${command.displayName}.`)
+        const output = await runShellCommand(command.command, [`"${dir.path}"`], dir.path)
+        if (output.code !== 0) {
+          // We got an error!
+          throw new Error(`Export failed: ${output.stderr}`)
+        }
+        continue
+      } else if (profile === undefined) {
+        continue // We cannot reach this point, but we need the else if for TypeScript
+      }
+
+      this._app.log.info(`[Project] Exporting ${dir.name} as ${profile.writer} (Profile: ${profile.name}).`)
+
       let template
-      if ([ 'html', 'chromium-pdf' ].includes(format) && config.templates.html !== '') {
+      if (profile.writer === 'html' && config.templates.html !== '') {
         template = config.templates.html
-      } else if (format === 'latex-pdf' && config.templates.tex !== '') {
+      } else if (profile.writer === 'pdf' && config.templates.tex !== '') {
         template = config.templates.tex
       }
 
+      const sourceFiles = existingFilesWithSorting.map(file => {
+        return { path: file, name: path.basename(file), ext: path.extname(file) }
+      })
+
       try {
         const opt: ExporterOptions = {
-          format: format,
-          sourceFiles: files,
+          profile,
+          sourceFiles,
           targetDirectory: dir.path,
           cwd: dir.path,
           defaultsOverride: {
             title: config.title,
             csl: (typeof config.cslStyle === 'string' && config.cslStyle.length > 0) ? config.cslStyle : undefined,
-            template: template
+            template
           }
         }
 
         this._app.log.verbose(`[Project Export] Exporting ${opt.sourceFiles.length} files to ${opt.targetDirectory}`)
 
-        const result = await makeExport(opt, this._app.config, this._app.assets)
+        const result = await makeExport(opt, this._app.log, this._app.config, this._app.assets)
         if (result.code !== 0) {
           // We got an error!
           throw new Error(`Export failed: ${result.stderr.join('\n')}`)
         }
         this._app.log.info(`[Project] Exported ${dir.name} as ${result.targetFile}`)
       } catch (err: any) {
-        this._app.log.error(err.message, err)
+        this._app.log.error(String(err.message), err)
         this._app.windows.showErrorMessage(
-          ('title' in err) ? err.title : err.message,
-          err.message,
-          ('additionalInfo' in err) ? err.additionalInfo : ''
+          ('title' in err) ? String(err.title) : String(err.message),
+          String(err.message),
+          ('additionalInfo' in err) ? String(err.additionalInfo) : ''
         )
       }
     }
 
-    // TODO: Translate!
-    const notificationShown = this._app.notifications.show('Project successfully exported. Click to show.', 'Export', () => {
-      openDirectory(this._app.log, dir.path)
-    })
+    const notificationShown = showNativeNotification(
+      trans('Project "%s" successfully exported. Click to show.', config.title),
+      trans('Project Export'),
+      () => {
+        openDirectory(this._app.log, dir.path)
+      }
+    )
 
     if (!notificationShown) {
       openDirectory(this._app.log, dir.path)

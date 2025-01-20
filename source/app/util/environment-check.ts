@@ -17,21 +17,34 @@ import { app } from 'electron'
 import { promises as fs } from 'fs'
 import isFile from '../../common/util/is-file'
 import isTraySupported from './is-tray-supported'
-import commandExists from 'command-exists'
+import { getProgramVersion } from './get-program-version'
+import fixPath from 'fix-path'
 
 export default async function environmentCheck (): Promise<void> {
   console.log('[Application] Performing environment check ...')
 
+  // This is necessary on macOS and Linux, because GUI applications may not
+  // inherit the same PATH environment variable as terminal programs. This is
+  // necessary, however, to detect additional helper programs, such as quarto.
+  fixPath()
+
   /**
-   * Contains custom paths that should be present on the process.env.PATH property
-   * for the given operating system as reported by process.platform.
+   * Contains custom paths that should be present on the process.env.PATH
+   * property for the given operating system as reported by process.platform.
+   *
+   * @deprecated With the addition of `fixPath`, it is highly likely that we do
+   * not need this contraption anymore.
    */
   const CUSTOM_PATHS: { [key in NodeJS.Platform]: string[] } = {
     win32: [],
     linux: ['/usr/bin'],
     darwin: [
+      // LaTeX binary directory
+      '/Library/TeX/texbin',
+      // Homebrew default for Intel Macs
       '/usr/local/bin',
-      '/Library/TeX/texbin'
+      // Homebrew default for M1 Macs
+      '/opt/homebrew/bin'
     ],
     aix: [],
     android: [],
@@ -92,13 +105,34 @@ export default async function environmentCheck (): Promise<void> {
     // We're in develop mode, so possibly, we have a Pandoc exe. Let's check
     const resPath = path.join(__dirname, '../../resources', executable)
     if (isFile(resPath)) {
-      console.log(`[Application] App is unpackaged, and Pandoc has been found in the resources directory: ${resPath}`)
       process.env.PANDOC_PATH = resPath
+      console.log(`[Application] App is unpackaged, and Pandoc has been found in the resources directory: ${resPath}`)
     } else {
       console.warn(`[Application] App is unpackaged, but there was no Pandoc executable: ${resPath}`)
     }
   } else {
     console.warn('[Application] Pandoc has not been bundled with this release. Falling back to system version instead.')
+  }
+
+  // Now, let's see if there's a quarto package installed
+  try {
+    const version = await getProgramVersion('quarto')
+    console.log(`[Application] Found a system-wide Quarto install! Version ${String(version)}`)
+    process.env.QUARTO_SUPPORT = '1'
+    process.env.QUARTO_VERSION = String(version)
+  } catch (err) {
+    // No system wide install
+    console.log('[Application] Quarto not found on system. *.qmd-files will be exported with Pandoc.')
+    process.env.QUARTO_SUPPORT = '0'
+  }
+
+  // Finally, determine if git is installed on this machine
+  try {
+    const version = await getProgramVersion('git')
+    process.env.GIT_SUPPORT = '1'
+    process.env.GIT_VERSION = version
+  } catch (err) {
+    process.env.GIT_SUPPORT = '0'
   }
 
   // Make sure the PATH property exists
@@ -142,14 +176,6 @@ export default async function environmentCheck (): Promise<void> {
     process.env.ZETTLR_IS_TRAY_SUPPORTED = '0'
     process.env.ZETTLR_TRAY_ERROR = err.message
     console.warn(err.message)
-  }
-
-  // Determine if git is installed on this machine
-  try {
-    await commandExists('git')
-    process.env.GIT_SUPPORT = '1'
-  } catch (err) {
-    process.env.GIT_SUPPORT = '0'
   }
 
   console.log('[Application] Environment check complete.')

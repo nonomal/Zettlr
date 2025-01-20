@@ -12,11 +12,18 @@
  * END HEADER
  */
 
-import { app, BrowserWindow, dialog, SaveDialogOptions, SaveDialogReturnValue } from 'electron'
+import {
+  app,
+  dialog,
+  type BrowserWindow,
+  type SaveDialogOptions,
+  type SaveDialogReturnValue
+} from 'electron'
 import path from 'path'
 import isDir from '@common/util/is-dir'
 import { trans } from '@common/i18n-main'
-import LogProvider from '@providers/log'
+import type LogProvider from '@providers/log'
+import type ConfigProvider from '@providers/config'
 
 /**
 * Displays a dialog to prompt the user for a file path
@@ -48,7 +55,7 @@ export default async function saveFileDialog (logger: LogProvider, config: Confi
 
   // Prepare options
   let opt: SaveDialogOptions = {
-    title: trans('system.save_file'),
+    title: trans('Save file'),
     // If the caller has provided an absolute path to a file, start there. Otherwise,
     // concatenate the startdir
     defaultPath: (isDir(path.dirname(fileOrPathName))) ? fileOrPathName : path.join(startDir, fileOrPathName),
@@ -56,8 +63,10 @@ export default async function saveFileDialog (logger: LogProvider, config: Confi
   }
 
   let response: SaveDialogReturnValue
-  // DEBUG: Trying to resolve bug #1645, which seems to relate to modal status vs. promise awaits.
-  if (win !== null && [ 'darwin', 'win32' ].includes(process.platform)) {
+  // DEBUG: Trying to resolve bug #1645, which seems to relate to modal status
+  // vs. promise awaits. UPDATE 2024-03-11: In response to #4952, removing the
+  // platform check again.
+  if (win !== null) {
     response = await dialog.showSaveDialog(win, opt)
   } else {
     response = await dialog.showSaveDialog(opt)

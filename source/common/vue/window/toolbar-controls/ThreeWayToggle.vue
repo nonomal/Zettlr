@@ -16,7 +16,7 @@
       v-bind:title="control.stateOne.title"
       v-on:click="toggle('stateOne')"
     >
-      <clr-icon v-if="control.stateOne.icon" v-bind:shape="control.stateOne.icon"></clr-icon>
+      <cds-icon v-if="control.stateOne.icon" v-bind:shape="control.stateOne.icon"></cds-icon>
     </button>
     <!-- Second state -->
     <button
@@ -29,12 +29,12 @@
       v-bind:title="control.stateTwo.title"
       v-on:click="toggle('stateTwo')"
     >
-      <clr-icon v-if="control.stateTwo.icon" v-bind:shape="control.stateTwo.icon"></clr-icon>
+      <cds-icon v-if="control.stateTwo.icon" v-bind:shape="control.stateTwo.icon"></cds-icon>
     </button>
   </div>
 </template>
 
-<script>
+<script setup lang="ts">
 /**
  * @ignore
  * BEGIN HEADER
@@ -52,56 +52,62 @@
  *
  * END HEADER
  */
+import { ref, computed, watch } from 'vue'
 
-export default {
-  name: 'ThreeWayToggle',
-  props: {
-    control: {
-      type: Object,
-      default: function () { return {} }
-    }
-  },
-  emits: ['toggle'],
-  data: function () {
-    return {
-      activeState: this.control.initialState
-    }
-  },
-  computed: {
-    controlActiveChanged: function () {
-      return this.control.initialState
-    },
-    isStateOneActive: function () {
-      return this.activeState === this.control.stateOne.id
-    },
-    isStateTwoActive: function () {
-      return this.activeState === this.control.stateTwo.id
-    }
-  },
-  watch: {
-    controlActiveChanged: function () {
-      this.activeState = this.control.initialState
-    }
-  },
-  methods: {
-    toggle: function (state) {
-      if (state === 'stateOne' && this.isStateOneActive === true) {
-        // De-activate
-        this.activeState = undefined
-      } else if (state === 'stateOne') {
-        // Activate state one
-        this.activeState = this.control.stateOne.id
-      } else if (state === 'stateTwo' && this.isStateTwoActive === true) {
-        // De-activate
-        this.activeState = undefined
-      } else {
-        // Activate state two
-        this.activeState = this.control.stateTwo.id
-      }
-
-      this.$emit('toggle', this.activeState)
-    }
+export interface ToolbarThreeWayControl {
+  type: 'three-way-toggle'
+  id?: string
+  stateOne: {
+    id: string
+    title: string
+    icon: string
   }
+  stateTwo: {
+    id: string
+    title: string
+    icon: string
+  }
+  initialState: string|undefined
+  // Allow arbitrary properties that we ignore
+  [key: string]: any
+}
+const props = defineProps< { control: ToolbarThreeWayControl }>()
+const emit = defineEmits<(e: 'toggle', value: string|undefined) => void>() // TODO
+
+const activeState = ref<string|undefined>(props.control.initialState)
+
+const controlActiveChanged = computed<string|undefined>(() => {
+  return props.control.initialState
+})
+
+const isStateOneActive = computed<boolean>(() => {
+  return activeState.value === props.control.stateOne.id
+})
+
+const isStateTwoActive = computed<boolean>(() => {
+  return activeState.value === props.control.stateTwo.id
+})
+
+watch(controlActiveChanged, () => {
+  activeState.value = props.control.initialState
+})
+
+function toggle (state: 'stateOne'|'stateTwo'): void {
+  if (state === 'stateOne' && isStateOneActive.value) {
+    // De-activate
+    activeState.value = undefined
+  } else if (state === 'stateOne') {
+    // Activate state one
+    activeState.value = props.control.stateOne.id
+  } else if (state === 'stateTwo' && isStateTwoActive.value) {
+    // De-activate
+    activeState.value = undefined
+  } else {
+    // Activate state two
+    activeState.value = props.control.stateTwo.id
+  }
+
+  emit('toggle', activeState.value)
 }
 </script>
 

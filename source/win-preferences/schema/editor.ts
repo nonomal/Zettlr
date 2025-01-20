@@ -13,65 +13,193 @@
  */
 
 import { trans } from '@common/i18n-renderer'
+import { type PreferencesFieldset } from '../App.vue'
+import { PreferencesGroups } from './_preferences-groups'
+import type { ConfigOptions } from 'source/app/service-providers/config/get-config-template'
 
-export default function (): any {
-  return {
-    fieldsets: [
-      [
+export function getEditorFields (config: ConfigOptions): PreferencesFieldset[] {
+  return [
+    {
+      title: trans('Input mode'),
+      group: PreferencesGroups.Editor,
+      titleField: {
+        type: 'select',
+        model: 'editor.inputMode',
+        options: {
+          default: 'Normal',
+          emacs: 'Emacs',
+          vim: 'Vim'
+        }
+      },
+      help: undefined, // TODO
+      fields: [
         {
-          type: 'radio',
-          label: trans('dialog.preferences.formatting_characters_explanation'),
-          model: 'editor.boldFormatting',
-          options: {
-            '**': '**' + trans('gui.formatting.bold') + '**',
-            '__': '__' + trans('gui.formatting.bold') + '__'
-          }
+          type: 'form-text',
+          display: 'info',
+          contents: trans('The input mode determines how you interact with the editor. We recommend keeping this setting at "Normal". Only choose "Vim" or "Emacs" if you know what this implies.')
+        }
+      ]
+    },
+    {
+      title: trans('Writing direction'),
+      group: PreferencesGroups.Editor,
+      help: undefined, // TODO
+      fields: [
+        // TODO: Add field for LTR/RTL
+        {
+          type: 'form-text',
+          display: 'info',
+          contents: 'We are currently planning on re-introducing bidirectional writing support, which will then be configurable here.'
+        }
+      ]
+    },
+    {
+      title: trans('Markdown rendering'),
+      group: PreferencesGroups.Editor,
+      help: undefined, // TODO
+      fields: [
+        {
+          type: 'form-text',
+          display: 'info',
+          contents: trans('Check to enable live rendering of various Markdown elements to formatted appearance. This hides formatting characters (such as **text**) or renders images instead of their link.')
         },
         {
-          type: 'radio',
-          model: 'editor.italicFormatting',
-          options: {
-            '*': '*' + trans('gui.formatting.italic') + '*',
-            '_': '_' + trans('gui.formatting.italic') + '_'
-          }
-        }
-      ],
-      [
+          type: 'style-group',
+          style: 'columns',
+          fields: [
+            {
+              type: 'checkbox',
+              label: trans('Render Citations'),
+              model: 'display.renderCitations'
+            },
+            {
+              type: 'checkbox',
+              label: trans('Render Iframes'),
+              model: 'display.renderIframes'
+            },
+            {
+              type: 'checkbox',
+              label: trans('Render Images'),
+              model: 'display.renderImages'
+            },
+            {
+              type: 'checkbox',
+              label: trans('Render Links'),
+              model: 'display.renderLinks'
+            },
+            {
+              type: 'checkbox',
+              label: trans('Render Formulae'),
+              model: 'display.renderMath'
+            },
+            {
+              type: 'checkbox',
+              label: trans('Render Tasks'),
+              model: 'display.renderTasks'
+            },
+            {
+              type: 'checkbox',
+              label: trans('Hide heading characters'),
+              model: 'display.renderHTags'
+            },
+            {
+              type: 'checkbox',
+              label: trans('Render emphasis'),
+              model: 'display.renderEmphasis'
+            }
+          ]
+        },
+        { type: 'separator' },
         {
-          type: 'radio',
-          label: trans('dialog.preferences.auto_save.label'),
-          model: 'editor.autoSave',
-          options: {
-            'off': trans('dialog.preferences.auto_save.off'),
-            'immediately': trans('dialog.preferences.auto_save.immediately'),
-            'delayed': trans('dialog.preferences.auto_save.delayed')
-          }
-        }
-      ],
-      [
-        {
-          type: 'text',
-          label: trans('dialog.preferences.default_image_save_path'),
-          model: 'editor.defaultSaveImagePath'
+          type: 'form-text',
+          display: 'sub-heading',
+          contents: trans('Formatting characters for bold and italic')
         },
         {
-          type: 'number',
-          label: trans('dialog.preferences.indent_unit'),
-          model: 'editor.indentUnit'
+          type: 'style-group',
+          style: 'columns',
+          fields: [
+            {
+              type: 'radio',
+              model: 'editor.boldFormatting',
+              options: {
+                '**': '**' + trans('Bold') + '**',
+                __: '__' + trans('Bold') + '__'
+              }
+            },
+            {
+              type: 'radio',
+              model: 'editor.italicFormatting',
+              options: {
+                '*': '*' + trans('Italics') + '*',
+                _: '_' + trans('Italics') + '_'
+              }
+            }
+          ]
+        },
+        { type: 'separator' },
+        {
+          type: 'checkbox',
+          label: trans('Check Markdown for style issues'),
+          model: 'editor.lint.markdown'
+        }
+      ]
+    },
+    {
+      title: trans('Table Editor'),
+      group: PreferencesGroups.Editor,
+      titleField: {
+        type: 'switch',
+        model: 'editor.enableTableHelper'
+      },
+      help: undefined, // TODO
+      fields: [
+        {
+          type: 'form-text',
+          display: 'info',
+          contents: trans('The Table Editor is an interactive interface that simplifies creation and editing of tables. It provides buttons for common functionality, and takes care of Markdown formatting.')
+        }
+      ]
+    },
+    {
+      title: trans('Distraction-free mode'),
+      group: PreferencesGroups.Editor,
+      help: undefined, // TODO
+      fields: [
+        {
+          type: 'checkbox',
+          label: trans('Mute non-focused lines in distraction-free mode'),
+          model: 'muteLines'
         },
         {
           type: 'checkbox',
-          label: trans('dialog.preferences.indent_with_tabs'),
-          model: 'editor.indentWithTabs'
-        },
+          label: trans('Hide toolbar in distraction free mode'),
+          model: 'display.hideToolbarInDistractionFree'
+        }
+      ]
+    },
+    {
+      title: trans('Word counter'),
+      group: PreferencesGroups.Editor,
+      help: undefined, // TODO
+      fields: [
         {
-          type: 'number',
-          label: trans('dialog.preferences.editor_font_size'),
-          model: 'editor.fontSize'
-        },
+          // TODO: Must be radio (Count words/Count characters)
+          type: 'checkbox',
+          label: trans('Count characters instead of words (e.g., for Chinese)'),
+          model: 'editor.countChars'
+        }
+      ]
+    },
+    {
+      title: trans('Readability mode'),
+      group: PreferencesGroups.Editor,
+      help: undefined, // TODO
+      fields: [
         {
           type: 'select',
-          label: trans('dialog.preferences.readability_algorithm'),
+          inline: true,
+          label: trans('Algorithm'),
           model: 'editor.readabilityAlgorithm',
           options: {
             'dale-chall': 'Dale-Chall',
@@ -79,66 +207,83 @@ export default function (): any {
             'coleman-liau': 'Coleman/Liau',
             'automated-readability': 'Automated Readability Index (ARI)'
           }
-        },
-        {
-          type: 'select',
-          label: trans('dialog.preferences.input_mode'),
-          model: 'editor.inputMode',
-          options: {
-            'default': 'Normal',
-            'emacs': 'Emacs',
-            'vim': 'Vim'
-          }
-        }
-      ],
-      [
-        {
-          type: 'checkbox',
-          label: trans('dialog.preferences.mute_lines'),
-          model: 'muteLines'
-        },
-        {
-          type: 'checkbox',
-          label: trans('dialog.preferences.auto_close_brackets'),
-          model: 'editor.autoCloseBrackets'
-        },
-        {
-          type: 'checkbox',
-          label: trans('dialog.preferences.autocomplete_accept_space'),
-          model: 'editor.autocompleteAcceptSpace'
-        },
-        {
-          type: 'checkbox',
-          label: trans('dialog.preferences.homeEndBehaviour'),
-          model: 'editor.homeEndBehaviour'
-        },
-        {
-          type: 'checkbox',
-          label: trans('dialog.preferences.enable_table_helper'),
-          model: 'editor.enableTableHelper'
-        },
-        {
-          type: 'checkbox',
-          label: trans('dialog.preferences.count_chars'),
-          model: 'editor.countChars'
-        }
-      ],
-      [
-        {
-          type: 'radio',
-          label: '', // TODO
-          model: 'editor.direction',
-          options: {
-            'ltr': trans('dialog.preferences.editor_setting.direction_ltr'),
-            'rtl': trans('dialog.preferences.editor_setting.direction_rtl')
-          }
-        },
-        {
-          type: 'checkbox',
-          label: trans('dialog.preferences.editor_setting.rtl_move_visually'),
-          model: 'editor.rtlMoveVisually'
         }
       ]
-    ]
-  }
+    },
+    {
+      title: trans('Image size'),
+      group: PreferencesGroups.Editor,
+      help: undefined, // TODO
+      fields: [
+        {
+          type: 'slider',
+          label: trans('Maximum width of images (%s %)', config.display.imageWidth),
+          min: 0,
+          max: 100,
+          model: 'display.imageWidth'
+        },
+        {
+          type: 'slider',
+          label: trans('Maximum height of images (%s %)', config.display.imageHeight),
+          min: 0,
+          max: 100,
+          model: 'display.imageHeight'
+        }
+      ]
+    },
+    {
+      title: trans('Other settings'),
+      group: PreferencesGroups.Editor,
+      help: undefined, // TODO
+      fields: [
+        {
+          type: 'number',
+          label: trans('Font size'),
+          inline: true,
+          model: 'editor.fontSize'
+        },
+        { type: 'separator' },
+        {
+          type: 'number',
+          label: trans('Indentation size (number of spaces)'),
+          inline: true,
+          model: 'editor.indentUnit'
+        },
+        {
+          // TODO: number+checkbox on the same line
+          type: 'checkbox',
+          label: trans('Indent using tabs instead of spaces'),
+          model: 'editor.indentWithTabs'
+        },
+        { type: 'separator' },
+        {
+          type: 'checkbox',
+          label: trans('Show formatting toolbar when text is selected'),
+          model: 'editor.showFormattingToolbar'
+        },
+        {
+          type: 'checkbox',
+          label: trans('Highlight whitespace'),
+          model: 'editor.showWhitespace'
+        },
+        {
+          // TODO: Where to move this new setting???
+          type: 'checkbox',
+          label: trans('Suggest emojis during autocompletion'),
+          model: 'editor.autocompleteSuggestEmojis'
+        },
+        {
+          type: 'checkbox',
+          label: trans('Show link previews'),
+          model: 'editor.showLinkPreviews'
+        },
+        {
+          // TODO: Where should this setting go?
+          type: 'checkbox',
+          label: trans('Automatically close matching character pairs'),
+          model: 'editor.autoCloseBrackets'
+        }
+      ]
+    }
+  ]
 }

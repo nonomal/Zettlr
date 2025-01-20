@@ -13,102 +13,163 @@
  */
 
 import { trans } from '@common/i18n-renderer'
+import { type PreferencesFieldset } from '../App.vue'
+import { PreferencesGroups } from './_preferences-groups'
+import type { ConfigOptions } from 'source/app/service-providers/config/get-config-template'
 
-export default function (): any {
-  return {
-    fieldsets: [
-      [
+/**
+ * Returns all available advanced preferences settings as a two-dimensional
+ * array where the first index denotes fieldsets, and the second are the
+ * individual controls in there.
+ *
+ * @return  {Fieldset[]}  The fields
+ */
+export function getAdvancedFields (config: ConfigOptions): PreferencesFieldset[] {
+  return [
+    {
+      title: trans('Pattern for new file names'),
+      group: PreferencesGroups.Advanced,
+      help: undefined, // TODO
+      fields: [
         {
           type: 'text',
-          label: trans('dialog.preferences.filename_generator'),
+          label: trans('Define a pattern for new file names'),
           model: 'newFileNamePattern',
-          info: 'Variables: %id, %Y, %y, %M, %D, %W, %h, %m, %s, %X, %uuid4'
+          info: trans('Available variables: %s', '%id, %Y, %y, %M, %D, %W, %h, %m, %s, %o, %X, %uuid4'),
+          reset: '%id.md',
+          group: 'advanced'
         },
         {
           type: 'checkbox',
-          label: trans('dialog.preferences.new_file_dont_prompt'),
-          model: 'newFileDontPrompt'
+          label: trans('Do not prompt for filename when creating new files'),
+          model: 'newFileDontPrompt',
+          group: 'advanced'
         }
-      ],
-      [
+      ]
+    },
+    {
+      title: trans('Appearance'),
+      group: PreferencesGroups.Advanced,
+      help: undefined, // TODO
+      fields: [
         {
           type: 'checkbox',
-          label: trans('dialog.preferences.debug'),
-          model: 'debug'
-        },
-        {
-          type: 'checkbox',
-          label: trans('dialog.preferences.checkForBeta'),
-          model: 'checkForBeta'
-        },
-        {
-          type: 'checkbox',
-          label: trans('dialog.preferences.use_native_appearance'),
+          label: trans('Use native window appearance'),
+          info: trans('Only available on Linux; this is the default for macOS and Windows.'),
           model: 'window.nativeAppearance',
           disabled: process.platform !== 'linux'
         },
         {
           type: 'checkbox',
-          label: trans('dialog.preferences.delete_on_fail'),
-          model: 'system.deleteOnFail'
+          label: trans('Enable window vibrancy'),
+          info: trans('Only available on macOS; makes the window background opaque.'),
+          model: 'window.vibrancy',
+          disabled: process.platform !== 'darwin'
         },
         {
           type: 'checkbox',
           label: process.platform === 'darwin'
-            ? trans('dialog.preferences.show_app_in_the_notification_area')
-            : trans('dialog.preferences.leave_app_running_in_the_notification_area'),
+            ? trans('Show app in the notification area')
+            : trans('Leave app running in the notification area'),
           model: 'system.leaveAppRunning',
           disabled: process.env.ZETTLR_IS_TRAY_SUPPORTED === '0',
           info: process.env.ZETTLR_TRAY_ERROR
         },
-        {
-          type: 'checkbox',
-          label: trans('dialog.preferences.check_updates'),
-          model: 'system.checkForUpdates'
-        }
-      ],
-      [
-        {
-          type: 'token',
-          label: trans('dialog.preferences.attachments_info'),
-          model: 'attachmentExtensions'
-        }
-      ],
-      [
+        { type: 'separator' },
         {
           type: 'radio',
           model: 'system.zoomBehavior',
-          label: trans('dialog.preferences.zoom_behavior.label'),
+          label: trans('Zoom behavior'),
+          inline: true,
           options: {
-            'gui': trans('dialog.preferences.zoom_behavior.gui'),
-            'editor': trans('dialog.preferences.zoom_behavior.editor')
+            gui: trans('Resizes the whole GUI'),
+            editor: trans('Changes the editor font size')
           }
         }
-      ],
-      [
+      ]
+    },
+    {
+      title: trans('Attachments sidebar'),
+      group: PreferencesGroups.Advanced,
+      help: undefined, // TODO
+      fields: [
+        {
+          type: 'token',
+          label: trans('File extensions to be visible in the Attachments sidebar'),
+          model: 'attachmentExtensions'
+        }
+      ]
+    },
+    {
+      title: trans('Iframe rendering whitelist'),
+      group: PreferencesGroups.Advanced,
+      help: undefined, // TODO
+      fields: [
         {
           type: 'list',
-          label: trans('dialog.preferences.whitelist'),
+          valueType: 'simpleArray',
           model: 'system.iframeWhitelist',
           deletable: true,
-          labels: [trans('dialog.preferences.whitelist_hostname')],
+          columnLabels: [trans('Hostname')],
           searchable: true,
-          searchLabel: trans('system.common.list_search_placeholder')
+          searchLabel: trans('Filter')
         }
-      ],
-      [
+      ]
+    },
+    {
+      title: trans('Watchdog polling'),
+      group: PreferencesGroups.Advanced,
+      help: undefined, // TODO
+      fields: [
         {
           type: 'checkbox',
-          label: trans('dialog.preferences.watchdog_checkbox_label'),
+          label: trans('Activate Watchdog polling'),
           model: 'watchdog.activatePolling'
         },
         {
           type: 'number',
-          label: trans('dialog.preferences.watchdog_threshold_label'),
+          label: trans('Time to wait before writing a file is considered done (in ms)'),
           model: 'watchdog.stabilityThreshold',
-          disabled: window.config.get('watchdog.activatePolling') === false
+          disabled: !config.watchdog.activatePolling
         }
       ]
-    ]
-  }
+    },
+    {
+      title: trans('Deleting items'),
+      group: PreferencesGroups.Advanced,
+      help: undefined, // TODO
+      fields: [
+        {
+          type: 'checkbox',
+          label: trans('Delete items irreversibly, if moving them to trash fails'),
+          model: 'system.deleteOnFail'
+        }
+      ]
+    },
+    {
+      title: trans('Debug mode'),
+      group: PreferencesGroups.Advanced,
+      help: undefined, // TODO
+      fields: [
+        {
+          type: 'checkbox',
+          label: trans('Enable debug mode'),
+          model: 'debug',
+          group: 'advanced'
+        }
+      ]
+    },
+    {
+      title: trans('Beta releases'),
+      group: PreferencesGroups.Advanced,
+      help: undefined, // TODO
+      fields: [
+        {
+          type: 'checkbox',
+          label: trans('Notify me about beta releases'),
+          model: 'checkForBeta'
+        }
+      ]
+    }
+  ]
 }

@@ -13,15 +13,15 @@
  * END HEADER
  */
 
-import LogProvider from '@providers/log'
+import type ConfigProvider from '@providers/config'
+import type LogProvider from '@providers/log'
 import {
   BrowserWindow,
-  BrowserWindowConstructorOptions
+  type BrowserWindowConstructorOptions
 } from 'electron'
 import attachLogger from './attach-logger'
-import preventNavigation from './prevent-navigation'
 import setWindowChrome from './set-window-chrome'
-import { WindowPosition } from './types'
+import type { WindowPosition } from './types'
 
 /**
  * Creates a BrowserWindow with project properties configuration
@@ -44,7 +44,7 @@ export default function createProjectPropertiesWindow (logger: LogProvider, conf
     show: false,
     fullscreenable: false,
     webPreferences: {
-      contextIsolation: true,
+      sandbox: true,
       preload: PROJECT_PROPERTIES_PRELOAD_WEBPACK_ENTRY
     }
   }
@@ -66,9 +66,6 @@ export default function createProjectPropertiesWindow (logger: LogProvider, conf
 
   // EVENT LISTENERS
 
-  // Prevent arbitrary navigation away from our WEBPACK_ENTRY
-  preventNavigation(logger, window)
-
   // Implement main process logging
   attachLogger(logger, window, 'Project Properties')
 
@@ -83,7 +80,6 @@ export default function createProjectPropertiesWindow (logger: LogProvider, conf
     // Do not "clearCache" because that would only delete my own index files
     ses.clearStorageData({
       storages: [
-        'appcache',
         'cookies', // Nobody needs cookies except for downloading pandoc etc
         'localstorage',
         'shadercache', // Should never contain anything

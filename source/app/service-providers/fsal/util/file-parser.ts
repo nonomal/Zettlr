@@ -13,13 +13,22 @@
  * END HEADER
  */
 
-import { getCodeBlockRE, getIDRE } from '@common/regular-expressions'
-import countWords from '@common/util/count-words'
-import extractYamlFrontmatter from '@common/util/extract-yaml-frontmatter'
-import { MDFileDescriptor } from '@dts/main/fsal'
+import { countChars, countWords } from '@common/util/counter'
+import type { MDFileDescriptor } from '@dts/common/fsal'
 import extractBOM from './extract-bom'
-import extractLinks from './extract-links'
-import extractTags from './extract-tags'
+import extractFileId from './extract-file-id'
+import { parse as parseYAML } from 'yaml'
+import {
+  markdownToAST as md2ast,
+  extractASTNodes
+} from '@common/modules/markdown-utils'
+import type {
+  Heading,
+  YAMLFrontmatter,
+  ZettelkastenLink,
+  ZettelkastenTag
+} from '@common/modules/markdown-utils/markdown-ast'
+import { extractLinefeed } from './extract-linefeed'
 
 // Here are all supported variables for Pandoc:
 // https://pandoc.org/MANUAL.html#variables
@@ -45,82 +54,97 @@ const FRONTMATTER_VARS = [
  * @returns {Function}            A parser that can then be used to parse files
  */
 export default function getMarkdownFileParser (
-  linkStart: string,
-  linkEnd: string,
   idREPattern: string
 ): (file: MDFileDescriptor, content: string) => void {
   return function parseMarkdownFile (
     file: MDFileDescriptor,
     content: string
   ): void {
-    // Prepare some necessary regular expressions and variables
-    const idRE = getIDRE(idREPattern)
-    const codeBlockRE = getCodeBlockRE(true)
-    const inlineCodeRE = /`[^`]+`/g
-    const h1HeadingRE = /^#{1}\s(.+)$/m
-
-    let match
-
     // First of all, determine all the things that have nothing to do with any
     // Markdown contents.
     file.bom = extractBOM(content)
-    file.linefeed = '\n'
-    if (content.includes('\r\n')) file.linefeed = '\r\n'
-    if (content.includes('\n\r')) file.linefeed = '\n\r'
+    file.linefeed = extractLinefeed(content)
+    file.id = extractFileId(file.name, content, idREPattern)
 
-    // Then prepare the file contents as we need it for most of the function:
-    // Strip a potential YAML frontmatter, code, and any HTML comments.
-    const extracted = extractYamlFrontmatter(content)
-    const frontmatter = extracted.frontmatter
+    // Parse the file into our AST
+    const ast = md2ast(content)
 
-    const contentWithoutYAML = extracted.content
-    const contentWithoutCode = contentWithoutYAML.replace(codeBlockRE, '').replace(inlineCodeRE, '')
-    const plainMarkdown = contentWithoutCode.replace(/<!--.+?-->/gs, '') // Note the dotall flag
+    const tags = extractASTNodes(ast, 'ZettelkastenTag') as ZettelkastenTag[]
+    file.tags = tags.map(tag => tag.value.toLowerCase())
 
-    // Finally, reset all those properties which we will extract from the file's
-    // content so that they remain in their default if we don't find those in the
-    // file.
-    file.id = ''
+    const links = extractASTNodes(ast, 'ZettelkastenLink') as ZettelkastenLink[]
+    file.links = links.map(link => link.value)
+
     file.firstHeading = null
-    file.tags = extractTags(content)
-    file.links = extractLinks(content, linkStart, linkEnd)
+    const headings = extractASTNodes(ast, 'Heading') as Heading[]
+    const firstH1 = headings.find(h => h.level === 1)
+    if (firstH1 !== undefined) {
+      file.firstHeading = firstH1.content
+    }
+
+    file.wordCount = countWords(ast)
+    file.charCount = countChars(ast)
+
+    // Reset frontmatter-related stuff
+    file.yamlTitle = undefined
     file.frontmatter = null
 
-    // Search for the file's ID first in the file name, and then in the full contents.
-    if ((match = idRE.exec(file.name)) == null) {
-      while ((match = idRE.exec(content)) != null) {
-        if (content.substr(match.index - linkStart.length, linkStart.length) !== linkStart) {
-          // Found the first ID. Precedence should go to the first found.
-          // Minor BUG: Takes IDs that are inside links but not literally make up for a link.
-          break
-        }
-      }
+    const frontmatterNodes = extractASTNodes(ast, 'YAMLFrontmatter') as YAMLFrontmatter[]
+    if (frontmatterNodes.length === 0) {
+      return // Nothing more to do
     }
 
-    if ((match != null) && (match[1].substr(-(linkEnd.length)) !== linkEnd)) {
-      file.id = match[1]
-    }
-
-    // At this point, we don't need the full content anymore. The next parsing
-    // steps rely on a Markdown string that is stripped of a potential YAML
-    // frontmatter, any code -- inline and blocks -- as well as any comments.
-
-    file.wordCount = countWords(plainMarkdown)
-    file.charCount = countWords(plainMarkdown, true)
-
-    const h1Match = h1HeadingRE.exec(contentWithoutYAML)
-    if (h1Match !== null) {
-      file.firstHeading = h1Match[1]
-    }
-
-    if (frontmatter !== null) {
+    try {
+      const frontmatter = parseYAML(frontmatterNodes[0].source)
       file.frontmatter = {}
+      const isPrimitive = [ 'string', 'number', 'boolean' ].includes(typeof frontmatter)
+
+      if (!isPrimitive && !Array.isArray(frontmatter)) {
+        file.frontmatter = frontmatter
+      }
+
       for (const [ key, value ] of Object.entries(frontmatter)) {
         // Only keep those values which Zettlr can understand
         if (FRONTMATTER_VARS.includes(key)) {
           file.frontmatter[key] = value
         }
       }
-    } // END: We got a frontmatter
+
+      // Extract the frontmatter title if applicable
+      if ('title' in frontmatter && typeof frontmatter.title === 'string') {
+        const title = frontmatter.title.trim()
+        if (title !== '') {
+          file.yamlTitle = title
+        }
+      }
+
+      for (const prop of [ 'keywords', 'tags' ]) {
+        if (frontmatter[prop] != null) {
+          // The user can just write "keywords: something", in which case it won't be
+          // an array, but a simple string (or even a number <.<). I am beginning to
+          // understand why programmers despise the YAML-format.
+          if (!Array.isArray(frontmatter[prop]) && typeof frontmatter[prop] === 'string') {
+            const keys = frontmatter[prop].split(',')
+            if (keys.length > 1) {
+              // The user decided to split the tags by comma
+              frontmatter[prop] = keys.map((tag: string) => tag.trim())
+            } else {
+              frontmatter[prop] = [frontmatter[prop]]
+            }
+          } else if (!Array.isArray(frontmatter[prop])) {
+            // It's likely a Number or a Boolean
+            frontmatter[prop] = [String(frontmatter[prop]).toString()]
+          }
+
+          // If the user decides to use just numbers for the keywords (e.g. #1997),
+          // the YAML parser will obviously cast those to numbers, but we don't want
+          // this, so forcefully cast everything to string (see issue #1433).
+          const sanitizedKeywords: string[] = frontmatter[prop].map((tag: any) => String(tag).toString().toLowerCase())
+          file.tags.push(...sanitizedKeywords.filter((each) => !file.tags.includes(each)))
+        }
+      }
+    } catch (err: any) {
+      // The frontmatter was invalid, but it's not of concern for us here
+    }
   }
 }

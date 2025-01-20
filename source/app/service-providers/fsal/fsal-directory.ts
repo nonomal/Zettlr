@@ -14,39 +14,30 @@
 
 import path from 'path'
 import { promises as fs } from 'fs'
-import hash from '@common/util/hash'
 import isDir from '@common/util/is-dir'
 import isFile from '@common/util/is-file'
 import ignoreDir from '@common/util/ignore-dir'
 import safeAssign from '@common/util/safe-assign'
-
-import { shell } from 'electron'
+import pathExists from '@common/util/path-exists'
 
 import * as FSALFile from './fsal-file'
 import * as FSALCodeFile from './fsal-code-file'
 import * as FSALAttachment from './fsal-attachment'
-import { ProjectSettings, DirMeta } from '@dts/common/fsal'
-import { DirDescriptor, AnyDescriptor, MaybeRootDescriptor, MDFileDescriptor } from '@dts/main/fsal'
-import FSALCache from './fsal-cache'
-import {
-  codeFileExtensions,
-  mdFileExtensions
-} from '@providers/fsal/util/valid-file-extensions'
-import TagProvider from '@providers/tags'
-import TargetProvider from '@providers/targets'
-import { isMdOrCodeFile } from './util/is-md-or-code-file'
+import type { DirDescriptor, AnyDescriptor, MDFileDescriptor, SortMethod, ProjectSettings } from '@dts/common/fsal'
+import type FSALCache from './fsal-cache'
+import { safeDelete } from './util/safe-delete'
+import { getFilesystemMetadata } from './util/get-fs-metadata'
+import type LogProvider from '@providers/log'
+import { hasCodeExt, hasMarkdownExt } from '@common/util/file-extention-checks'
 
 /**
  * Determines what will be written to file (.ztr-directory)
  */
 const SETTINGS_TEMPLATE = {
-  sorting: 'name-up',
-  project: null, // Default: no project
-  icon: null // Default: no icon
+  sorting: 'name-up' as SortMethod,
+  project: null as ProjectSettings|null, // Default: no project
+  icon: null as null|string // Default: no icon
 }
-
-const ALLOWED_CODE_FILES = codeFileExtensions(true)
-const MARKDOWN_FILES = mdFileExtensions(true)
 
 /**
  * Used to insert a default project
@@ -54,19 +45,14 @@ const MARKDOWN_FILES = mdFileExtensions(true)
 const PROJECT_TEMPLATE: ProjectSettings = {
   // General values that not only pertain to the PDF generation
   title: 'Untitled', // Default project title is the directory's name
-  formats: [ 'html', 'chromium-pdf' ], // NOTE: Must correspond to the defaults in ProjectProperties.vue
-  filters: [], // A list of filters (glob patterns) to exclude certain files
+  profiles: [], // NOTE: Must correspond to the defaults in ProjectProperties.vue
+  files: [], // A list of absolute paths to the files to be included, sorted (!)
   cslStyle: '', // A path to an optional CSL style file.
   templates: {
     tex: '', // An optional tex template
     html: '' // An optional HTML template
   }
 }
-
-/**
- * Allowed child sorting methods
- */
-type SortMethod = 'name-up'|'name-down'|'time-up'|'time-down'
 
 /**
  * Sorts the children-property of "dir". NOTE that this is an internal helper
@@ -76,56 +62,22 @@ type SortMethod = 'name-up'|'name-down'|'time-up'|'time-down'
  */
 function sortChildren (
   dir: DirDescriptor,
-  sorter: (arr: AnyDescriptor[], sortingType?: string) => AnyDescriptor[]
+  sorter: (arr: AnyDescriptor[], sortingType?: SortMethod) => AnyDescriptor[]
 ): void {
-  dir.children = sorter(dir.children, dir._settings.sorting)
+  dir.children = sorter(dir.children, dir.settings.sorting)
 }
 
 /**
- * This function returns a sanitized, non-circular version of dirObject.
+ * This function checks if a directory has the default settings. This can be
+ * useful to determine, if, e.g., the corresponding dotfile will be removed
+ * after removing its project settings.
  *
- * @param   {DirDescriptor}  dirObject  A directory descriptor
+ * @param   {DirDescriptor}  dir  The directory to check
  *
- * @return  {DirMeta}                   The corresponding meta descriptor
+ * @return  {boolean}             Returns true if the settings are the same as default.
  */
-export function metadata (dirObject: DirDescriptor): DirMeta {
-  // Handle the children
-  const children = dirObject.children.map((elem) => {
-    if (elem.type === 'directory') {
-      return metadata(elem)
-    } else if (elem.type === 'file') {
-      return FSALFile.metadata(elem)
-    } else if (elem.type === 'code') {
-      return FSALCodeFile.metadata(elem)
-    } else {
-      return FSALAttachment.metadata(elem)
-    }
-  })
-
-  return {
-    // By only passing the hash, the object becomes
-    // both lean AND it can be reconstructed into a
-    // circular structure with NO overheads in the
-    // renderer.
-    parent: (dirObject.parent !== null) ? dirObject.parent.hash : null,
-    path: dirObject.path,
-    dir: dirObject.dir,
-    name: dirObject.name,
-    hash: dirObject.hash,
-    size: dirObject.size,
-    // The project itself is not needed, renderer only checks if it equals
-    // null, or not (then it means there is a project)
-    project: dirObject._settings.project,
-    children: children,
-    type: dirObject.type,
-    isGitRepository: dirObject.isGitRepository,
-    sorting: dirObject._settings.sorting,
-    icon: dirObject._settings.icon,
-    modtime: dirObject.modtime,
-    creationtime: dirObject.creationtime,
-    // Include the optional dirNotFoundFlag
-    dirNotFoundFlag: dirObject.dirNotFoundFlag
-  }
+export function hasDefaultSettings (dir: DirDescriptor): boolean {
+  return JSON.stringify(dir.settings) === JSON.stringify(SETTINGS_TEMPLATE)
 }
 
 /**
@@ -135,8 +87,7 @@ export function metadata (dirObject: DirDescriptor): DirMeta {
  */
 async function persistSettings (dir: DirDescriptor): Promise<void> {
   const settingsFile = path.join(dir.path, '.ztr-directory')
-  const hasDefaultSettings = JSON.stringify(dir._settings) === JSON.stringify(SETTINGS_TEMPLATE)
-  if (hasDefaultSettings && isFile(settingsFile)) {
+  if (hasDefaultSettings(dir) && isFile(settingsFile)) {
     // Only persist the settings if they are not default. If they are default,
     // remove a possible .ztr-directory-file
     try {
@@ -146,7 +97,7 @@ async function persistSettings (dir: DirDescriptor): Promise<void> {
       throw err
     }
   }
-  await fs.writeFile(path.join(dir.path, '.ztr-directory'), JSON.stringify(dir._settings))
+  await fs.writeFile(settingsFile, JSON.stringify(dir.settings))
 }
 
 /**
@@ -157,65 +108,70 @@ async function persistSettings (dir: DirDescriptor): Promise<void> {
 async function parseSettings (dir: DirDescriptor): Promise<void> {
   const configPath = path.join(dir.path, '.ztr-directory')
   try {
-    let settings: any = await fs.readFile(configPath, { encoding: 'utf8' })
-    settings = JSON.parse(settings)
-    dir._settings = safeAssign(settings, SETTINGS_TEMPLATE)
+    let settings: string|typeof SETTINGS_TEMPLATE = await fs.readFile(configPath, { encoding: 'utf8' })
+    settings = JSON.parse(settings) as typeof SETTINGS_TEMPLATE
+    dir.settings = safeAssign(settings, SETTINGS_TEMPLATE)
     if (settings.project !== null) {
       // We have a project, so we need to sanitize the values (in case
       // that there have been changes to the config). We'll just use
       // the code from the config provider.
-      dir._settings.project = safeAssign(settings.project, PROJECT_TEMPLATE)
+      dir.settings.project = safeAssign(settings.project, PROJECT_TEMPLATE)
     }
-    if (JSON.stringify(dir._settings) === JSON.stringify(SETTINGS_TEMPLATE)) {
+    if (JSON.stringify(dir.settings) === JSON.stringify(SETTINGS_TEMPLATE)) {
       // The settings are the default, so no need to write them to file
       await fs.unlink(configPath)
     }
   } catch (err: any) {
-    // Something went wrong
-    err.message = `Could not parse settings file for ${dir.name}`
-    throw err
+    // Something went wrong. Unlink the malformed file. Do not throw an error
+    // since a malformed settings file should never stop loading a directory.
+    await fs.unlink(configPath)
   }
 }
 
 /**
- * Reads in a file tree recursively, returning the directory descriptor object.
+ * Reads in a directory, returning a corresponding descriptor object. By default
+ * this function reads in the entire directory tree recursively which may take
+ * some time. If you only need the actual directory descriptor, pass `shallow`
+ * as true to prevent it from recursively parsing the tree.
  *
  * @param   {string}              currentPath  The directory's path
  * @param   {FSALCache}           cache        The FSAL cache object
- * @param   {DirDescriptor|null}  parent       An optional parent
+ * @param   {Function}            parser       A MD file parser
+ * @param   {Function}            sorter       A directory child sorter function
+ * @param   {boolean}             isRoot       Whether this descriptor is a root
+ * @param   {boolean}             shallow      If false, children list will not
+ *                                             be parsed
  *
- * @return  {Promise<DirDescriptor>}           Resolves with the directory descriptor
+ * @return  {Promise<DirDescriptor>}           Resolves with the descriptor
  */
 export async function parse (
   currentPath: string,
   cache: FSALCache,
-  tags: TagProvider,
-  targets: TargetProvider,
   parser: (file: MDFileDescriptor, content: string) => void,
-  sorter: (arr: AnyDescriptor[], sortingType?: string) => AnyDescriptor[],
-  parent: DirDescriptor|null
+  sorter: (arr: AnyDescriptor[], sortingType?: SortMethod) => AnyDescriptor[],
+  isRoot: boolean,
+  shallow: boolean = false
 ): Promise<DirDescriptor> {
   // Prepopulate
   const dir: DirDescriptor = {
-    parent: parent,
+    root: isRoot,
     path: currentPath,
     name: path.basename(currentPath),
     dir: path.dirname(currentPath),
     size: 0,
-    hash: hash(currentPath),
     children: [],
     type: 'directory',
     isGitRepository: false,
     modtime: 0, // You know when something has gone wrong: 01.01.1970
     creationtime: 0,
-    _settings: JSON.parse(JSON.stringify(SETTINGS_TEMPLATE))
+    settings: JSON.parse(JSON.stringify(SETTINGS_TEMPLATE))
   }
 
   // Retrieve the metadata
   try {
-    const stats = await fs.lstat(dir.path)
-    dir.modtime = stats.ctimeMs
-    dir.creationtime = stats.birthtimeMs
+    const metadata = await getFilesystemMetadata(dir.path)
+    dir.modtime = metadata.modtime
+    dir.creationtime = metadata.birthtime
   } catch (err: any) {
     err.message = `Error reading metadata for directory ${dir.path}!`
     // Re-throw so that the caller knows something's afoul
@@ -234,22 +190,29 @@ export async function parse (
     } else if (child === '.git' && isDir(absolutePath)) {
       dir.isGitRepository = true
       continue
+    } else if (child.startsWith('.')) {
+      continue // Ignore hidden files
+    }
+
+    // The `shallow` flag indicates that the directory should not be parsed
+    // recursively, so we will simply continue here. The reason we do parse the
+    // rest of the list here is that the directory file or git may show up at a
+    // later point.
+    if (shallow) {
+      continue
     }
 
     if (isDir(absolutePath) && !ignoreDir(absolutePath)) {
-      const cDir = await parse(absolutePath, cache, tags, targets, parser, sorter, dir)
+      const cDir = await parse(absolutePath, cache, parser, sorter, false)
       dir.children.push(cDir)
-    } else if (isMdOrCodeFile(absolutePath)) {
-      const isCode = ALLOWED_CODE_FILES.includes(path.extname(absolutePath).toLowerCase())
-      if (isCode) {
-        const file = await FSALCodeFile.parse(absolutePath, cache, dir)
-        dir.children.push(file)
-      } else {
-        const file = await FSALFile.parse(absolutePath, cache, parser, targets, tags, dir)
-        dir.children.push(file)
-      }
+    } else if (hasMarkdownExt(absolutePath)) {
+      const file = await FSALFile.parse(absolutePath, cache, parser, false)
+      dir.children.push(file)
+    } else if (hasCodeExt(absolutePath)) {
+      const file = await FSALCodeFile.parse(absolutePath, cache, false)
+      dir.children.push(file)
     } else if (isFile(absolutePath)) {
-      dir.children.push(await FSALAttachment.parse(absolutePath, dir))
+      dir.children.push(await FSALAttachment.parse(absolutePath))
     } // Else: Probably a symlink TODO
   }
 
@@ -268,11 +231,10 @@ export async function parse (
  */
 export function getDirNotFoundDescriptor (dirPath: string): DirDescriptor {
   return {
-    parent: null, // Always a root
+    root: true, // Not found directories are always roots
     path: dirPath,
     name: path.basename(dirPath),
     dir: path.dirname(dirPath),
-    hash: hash(dirPath),
     size: 0,
     children: [], // Always empty
     type: 'directory',
@@ -280,7 +242,7 @@ export function getDirNotFoundDescriptor (dirPath: string): DirDescriptor {
     modtime: 0, // ¯\_(ツ)_/¯
     creationtime: 0,
     // Settings are expected by some functions
-    _settings: JSON.parse(JSON.stringify(SETTINGS_TEMPLATE)),
+    settings: JSON.parse(JSON.stringify(SETTINGS_TEMPLATE)),
     dirNotFoundFlag: true
   }
 }
@@ -291,8 +253,8 @@ export function getDirNotFoundDescriptor (dirPath: string): DirDescriptor {
  * @param   {DirDescriptor}  dirObject  The directory descriptor in question.
  * @param   {any}            settings   A settings object to be assigned
  */
-export async function setSetting (dirObject: DirDescriptor, settings: any): Promise<void> {
-  dirObject._settings = safeAssign(settings, dirObject._settings)
+export async function setSetting (dirObject: DirDescriptor, settings: Partial<DirDescriptor['settings']>): Promise<void> {
+  dirObject.settings = safeAssign(settings, dirObject.settings)
   await persistSettings(dirObject)
 }
 
@@ -304,15 +266,15 @@ export async function setSetting (dirObject: DirDescriptor, settings: any): Prom
  */
 export async function sort (
   dirObject: DirDescriptor,
-  sorter: (arr: AnyDescriptor[], sortingType?: string) => AnyDescriptor[],
+  sorter: (arr: AnyDescriptor[], sortingType?: SortMethod) => AnyDescriptor[],
   method?: SortMethod
 ): Promise<void> {
   // If the caller omits the method, it should remain unchanged
   if (method === undefined) {
-    method = dirObject._settings.sorting
+    method = dirObject.settings.sorting
   }
 
-  dirObject._settings.sorting = method
+  dirObject.settings.sorting = method
   // Persist the settings to disk
   await persistSettings(dirObject)
   sortChildren(dirObject, sorter)
@@ -324,8 +286,8 @@ export async function sort (
  * @param   {DirDescriptor}  dirObject   The directory descriptor
  * @param   {any}            properties  Initial properties to set
  */
-export async function makeProject (dirObject: DirDescriptor, properties: any): Promise<void> {
-  dirObject._settings.project = safeAssign(properties, PROJECT_TEMPLATE)
+export async function makeProject (dirObject: DirDescriptor, properties: Partial<ProjectSettings>): Promise<void> {
+  dirObject.settings.project = safeAssign(properties, PROJECT_TEMPLATE)
   await persistSettings(dirObject)
 }
 
@@ -338,25 +300,14 @@ export async function makeProject (dirObject: DirDescriptor, properties: any): P
  *
  * @return {boolean}                     Returns false if no properties changed
  */
-export async function updateProjectProperties (dirObject: DirDescriptor, properties: any): Promise<boolean> {
-  if (dirObject._settings.project === null) {
+export async function updateProjectProperties (dirObject: DirDescriptor, properties: ProjectSettings): Promise<void> {
+  if (dirObject.settings.project === null) {
     throw new Error(`[FSAL Dir] Attempted to update project settings on dir ${dirObject.path}, but it is not a project!`)
   }
 
-  const titleUnchanged = dirObject._settings.project.title === properties.title
-  const cslUnchanged = dirObject._settings.project.cslStyle === properties.cslStyle
-  const formatsUnchanged = JSON.stringify(dirObject._settings.project.formats) === JSON.stringify(properties.formats)
-  const filtersUnchanged = JSON.stringify(dirObject._settings.project.filters) === JSON.stringify(properties.filters)
-  const templatesUnchanged = JSON.stringify(dirObject._settings.project.templates) === JSON.stringify(properties.templates)
-
-  if (titleUnchanged && cslUnchanged && formatsUnchanged && filtersUnchanged && templatesUnchanged) {
-    return false
-  }
-
-  dirObject._settings.project = safeAssign(properties, dirObject._settings.project)
+  dirObject.settings.project = safeAssign(properties, dirObject.settings.project)
   // Immediately reflect on disk
   await persistSettings(dirObject)
-  return true
 }
 
 // Removes a project
@@ -366,7 +317,7 @@ export async function updateProjectProperties (dirObject: DirDescriptor, propert
  * @param   {DirDescriptor}  dirObject  The directory descriptor
  */
 export async function removeProject (dirObject: DirDescriptor): Promise<void> {
-  dirObject._settings.project = null
+  dirObject.settings.project = null
   await persistSettings(dirObject)
 }
 
@@ -377,13 +328,9 @@ export async function removeProject (dirObject: DirDescriptor): Promise<void> {
  * @param   {string}         newName    The name for the new directory
  * @param   {FSALCache}      cache      The cache object
  */
-export async function create (
+export async function createDirectory (
   dirObject: DirDescriptor,
   newName: string,
-  cache: FSALCache,
-  tags: TagProvider,
-  targets: TargetProvider,
-  parser: (file: MDFileDescriptor, content: string) => void,
   sorter: (arr: AnyDescriptor[], sortingType?: string) => AnyDescriptor[]
 ): Promise<void> {
   if (newName.trim() === '') {
@@ -397,7 +344,21 @@ export async function create (
 
   const newPath = path.join(dirObject.path, newName)
   await fs.mkdir(newPath)
-  const newDir = await parse(newPath, cache, tags, targets, parser, sorter, dirObject)
+  const metadata = await getFilesystemMetadata(newPath)
+
+  const newDir: DirDescriptor = {
+    root: false,
+    type: 'directory',
+    isGitRepository: false,
+    modtime: metadata.modtime,
+    creationtime: metadata.birthtime,
+    size: 0,
+    children: [],
+    path: newPath,
+    name: newName,
+    dir: dirObject.path,
+    settings: JSON.parse(JSON.stringify(SETTINGS_TEMPLATE))
+  }
   // Add the new directory to the source dir
   dirObject.children.push(newDir)
   sortChildren(dirObject, sorter)
@@ -410,27 +371,8 @@ export async function create (
  * @param   {any}            options    Options, containing a name and content property
  * @param   {FSALCache}      cache      The FSAL cache to cache the resulting file
  */
-export async function createFile (
-  dirObject: DirDescriptor,
-  options: any,
-  cache: FSALCache,
-  targets: TargetProvider,
-  tags: TagProvider,
-  parser: (file: MDFileDescriptor, content: string) => void,
-  sorter: (arr: AnyDescriptor[], sortingType?: string) => AnyDescriptor[]
-): Promise<void> {
-  const filename = options.name
-  const content = options.content
-  const fullPath = path.join(dirObject.path, filename)
-  await fs.writeFile(fullPath, content)
-  if ('type' in options && options.type === 'code') {
-    const file = await FSALCodeFile.parse(fullPath, cache, dirObject)
-    dirObject.children.push(file)
-  } else {
-    const file = await FSALFile.parse(fullPath, cache, parser, targets, tags, dirObject)
-    dirObject.children.push(file)
-  }
-  sortChildren(dirObject, sorter)
+export async function createFile (filePath: string, content: string): Promise<void> {
+  await fs.writeFile(filePath, content)
 }
 
 /**
@@ -438,72 +380,70 @@ export async function createFile (
  * new descriptor. Due to every single child changing their paths, it is
  * computationally less expensive to simply re-build the tree from scratch.
  *
- * @param   {DirDescriptor}  dirObject  The directory descriptor
- * @param   {string}         newName    The directory's new name
- * @param   {FSALCache}      cache      The FSAL cache object
+ * @param   {DirDescriptor}  dirObject      The directory descriptor
+ * @param   {string}         oldName        The directory's old name
+ * @param   {string}         newName        The directory's new name
+ * @param   {FSALCache}      cache          The FSAL cache object
+ * @param   {boolean}        forceOverwrite Whether to force overwriting of existing files when renaming to an existant filename
  *
  * @return  {Promise<DirDescriptor>}    Resolves with the new directory descriptor.
  */
-export async function rename (
+export async function renameChild (
   dirObject: DirDescriptor,
+  oldName: string,
   newName: string,
-  tags: TagProvider,
-  targets: TargetProvider,
   parser: (file: MDFileDescriptor, content: string) => void,
   sorter: (arr: AnyDescriptor[], sortingType?: string) => AnyDescriptor[],
-  cache: FSALCache
-): Promise<DirDescriptor> {
+  cache: FSALCache,
+  forceOverwrite: boolean = false
+): Promise<void> {
+  // If old and new name are the same, no need to rename
+  if (newName === oldName) {
+    return
+  }
+
   // Check some things beforehand
   if (newName.trim() === '') {
-    throw new Error('Invalid directory name provided!')
-  }
-  let parentNames = await fs.readdir(path.dirname(dirObject.path))
-  if (parentNames.includes(newName)) {
-    throw new Error(`Directory ${newName} already exists!`)
+    throw new Error('Invalid name provided!')
   }
 
-  let newPath = path.join(path.dirname(dirObject.path), newName)
-  await fs.rename(dirObject.path, newPath)
-  // Rescan the new dir to get all new file information
-  let newDir = await parse(newPath, cache, tags, targets, parser, sorter, dirObject.parent)
-  if (dirObject.parent !== null) {
-    // Exchange the directory in the parent
-    let index = dirObject.parent.children.indexOf(dirObject)
-    dirObject.parent.children.splice(index, 1, newDir)
-    // Now sort the parent
-    sortChildren(dirObject.parent, sorter)
+  const oldDescriptor = dirObject.children.find(child => child.name === oldName)
+  if (oldDescriptor === undefined) {
+    throw new Error(`Cannot rename ${oldName}: Not found in ${dirObject.path}.`)
   }
 
-  // Return the new directory -- either to replace it in the filetree, or,
-  // if applicable, the openDirectory
-  return newDir
-}
-
-/**
- * Removes a directory from disk
- *
- * @param   {DirDescriptor}  dirObject  The directory to remove
- */
-export async function remove (dirObject: DirDescriptor, deleteOnFail: boolean): Promise<void> {
-  // First, get the parent, if there is any
-  let parentDir = dirObject.parent
-  try {
-    await shell.trashItem(dirObject.path)
-  } catch (err: any) {
-    if (deleteOnFail) {
-      // If this function throws, there's really something off and we shouldn't recover.
-      await fs.rmdir(dirObject.path, { recursive: true })
-    } else {
-      err.message = `[FSAL Directory] Could not remove directory ${dirObject.path}: ${String(err.message)}`
-      throw err
+  // Stops renaming if the new file will overwrite an old file and we don't want it to
+  if (newName.toLowerCase() !== oldName.toLowerCase() || !forceOverwrite) {
+    const foundName = dirObject.children.find(child => child.name.toLowerCase() === newName.toLowerCase())
+    if (foundName !== undefined) {
+      throw new Error(`Cannot rename ${oldName} to ${newName}: A file with the same name already exists!`)
     }
   }
 
-  // Now, remove the directory from the file tree as well
-  if (parentDir !== null) {
-    // Splice it from the parent directory
-    parentDir.children.splice(parentDir.children.indexOf(dirObject), 1)
+  const newPath = path.join(dirObject.path, newName)
+  await fs.rename(oldDescriptor.path, newPath)
+
+  // Remove the old descriptor
+  dirObject.children.splice(dirObject.children.indexOf(oldDescriptor), 1)
+
+  // Add the new descriptor
+  if (isDir(newPath)) {
+    // Rescan the new dir to get all new file information
+    const descriptor = await parse(newPath, cache, parser, sorter, false)
+    dirObject.children.push(descriptor)
+  } else if (hasMarkdownExt(newPath)) {
+    const descriptor = await FSALFile.parse(newPath, cache, parser, false)
+    dirObject.children.push(descriptor)
+  } else if (hasCodeExt(newPath)) {
+    const descriptor = await FSALCodeFile.parse(newPath, cache, false)
+    dirObject.children.push(descriptor)
+  } else {
+    const descriptor = await FSALAttachment.parse(newPath)
+    dirObject.children.push(descriptor)
   }
+
+  // Sort the children
+  sortChildren(dirObject, sorter)
 }
 
 /**
@@ -514,10 +454,9 @@ export async function remove (dirObject: DirDescriptor, deleteOnFail: boolean): 
  * @param   {FSALCache}      cache         The cache object.
  */
 export async function move (
+  sourceDir: DirDescriptor,
   sourceObject: AnyDescriptor,
   targetDir: DirDescriptor,
-  tags: TagProvider,
-  targets: TargetProvider,
   parser: (file: MDFileDescriptor, content: string) => void,
   sorter: (arr: AnyDescriptor[], sortingType?: string) => AnyDescriptor[],
   cache: FSALCache
@@ -530,17 +469,18 @@ export async function move (
   await fs.rename(sourcePath, targetPath)
 
   // Now remove the source from its parent (which in any case is a directory)
-  let oldChildren = sourceObject.parent?.children
-  if (oldChildren !== undefined) {
-    oldChildren.splice(oldChildren.indexOf(sourceObject as unknown as MaybeRootDescriptor), 1)
-  }
+  sourceDir.children.splice(sourceDir.children.indexOf(sourceObject), 1)
 
   // Re-read the source
   let newSource
   if (sourceObject.type === 'directory') {
-    newSource = await parse(targetPath, cache, tags, targets, parser, sorter, targetDir)
+    newSource = await parse(targetPath, cache, parser, sorter, false)
+  } else if (sourceObject.type === 'file') {
+    newSource = await FSALFile.parse(targetPath, cache, parser, false)
+  } else if (sourceObject.type === 'code') {
+    newSource = await FSALCodeFile.parse(targetPath, cache, false)
   } else {
-    newSource = await FSALFile.parse(targetPath, cache, parser, targets, tags, targetDir)
+    newSource = await FSALAttachment.parse(targetPath)
   }
 
   // Add it to the new target
@@ -551,7 +491,7 @@ export async function move (
 }
 
 export async function addAttachment (dirObject: DirDescriptor, attachmentPath: string): Promise<void> {
-  const attachment = await FSALAttachment.parse(attachmentPath, dirObject)
+  const attachment = await FSALAttachment.parse(attachmentPath)
   dirObject.children.push(attachment)
   // TODO: Sort the attachments afterwards! Generally, I just realised we never sort any of these.
 }
@@ -564,23 +504,30 @@ export function removeAttachment (dirObject: DirDescriptor, attachmentPath: stri
 export async function addChild (
   dirObject: DirDescriptor,
   childPath: string,
-  tags: TagProvider,
-  targets: TargetProvider,
   parser: (file: MDFileDescriptor, content: string) => void,
   sorter: (arr: AnyDescriptor[], sortingType?: string) => AnyDescriptor[],
   cache: FSALCache
 ): Promise<void> {
   if (isDir(childPath)) {
-    dirObject.children.push(await parse(childPath, cache, tags, targets, parser, sorter, dirObject))
-  } else if (ALLOWED_CODE_FILES.includes(path.extname(childPath))) {
-    dirObject.children.push(await FSALCodeFile.parse(childPath, cache, dirObject))
-  } else if (MARKDOWN_FILES.includes(path.extname(childPath))) {
-    dirObject.children.push(await FSALFile.parse(childPath, cache, parser, targets, tags, dirObject))
+    dirObject.children.push(await parse(childPath, cache, parser, sorter, false))
+  } else if (hasCodeExt(childPath)) {
+    dirObject.children.push(await FSALCodeFile.parse(childPath, cache, false))
+  } else if (hasMarkdownExt(childPath)) {
+    dirObject.children.push(await FSALFile.parse(childPath, cache, parser, false))
   }
   sortChildren(dirObject, sorter)
 }
 
-export function removeChild (dirObject: DirDescriptor, childPath: string): void {
+export async function removeChild (dirObject: DirDescriptor, childPath: string, deleteOnFail: boolean, logger: LogProvider): Promise<void> {
   const idx = dirObject.children.findIndex(element => element.path === childPath)
-  dirObject.children.splice(idx, 1)
+  if (idx > -1) {
+    // NOTE: This function may be called after a file or folder has been deleted. In that
+    // case the function only needs to remove the file or folder from the list of children
+    // to avoid safeDelete throwing an error as the file or folder does no longer exist.
+    if (await pathExists(childPath)) {
+      await safeDelete(childPath, deleteOnFail, logger)
+    }
+
+    dirObject.children.splice(idx, 1)
+  }
 }

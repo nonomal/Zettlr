@@ -14,50 +14,69 @@
 
 import { trans } from '@common/i18n-renderer'
 import showPopupMenu from '@common/modules/window-register/application-menu-helper'
-import { DirMeta } from '@dts/common/fsal'
-import { AnyMenuItem } from '@dts/renderer/context'
+import type { DirDescriptor } from '@dts/common/fsal'
+import type { AnyMenuItem } from '@dts/renderer/context'
+import type { WindowControlsIPCAPI } from 'source/app/service-providers/windows'
 
 const ipcRenderer = window.ipc
 
-export default function displayFileContext (event: MouseEvent, dirObject: DirMeta, el: HTMLElement, callback: any): void {
+export function displayDirContext (event: MouseEvent, dirObject: DirDescriptor, el: HTMLElement, callback: (clickedID: string) => void): void {
+  const isMac = process.platform === 'darwin'
+  const isWin = process.platform === 'win32'
+
   const TEMPLATE: AnyMenuItem[] = [
     {
-      label: trans('menu.properties'),
+      label: trans('Properties'),
       id: 'menu.properties',
       type: 'normal',
-      enabled: true
-    },
-    {
-      label: trans('menu.rename_dir'),
-      type: 'normal',
-      id: 'menu.rename_dir',
-      enabled: true
-    },
-    {
-      label: trans('menu.delete_dir'),
-      type: 'normal',
-      id: 'menu.delete_dir',
-      enabled: true
-    },
-    {
-      label: trans('gui.attachments_open_dir'),
-      type: 'normal',
-      id: 'gui.attachments_open_dir',
       enabled: true
     },
     {
       type: 'separator'
     },
     {
-      label: trans('menu.new_file'),
+      label: trans('New File…'),
       type: 'normal',
       id: 'menu.new_file',
       enabled: true
     },
     {
-      label: trans('menu.new_dir'),
+      label: trans('New directory…'),
       type: 'normal',
       id: 'menu.new_dir',
+      enabled: true
+    },
+    {
+      type: 'separator'
+    },
+    {
+      label: trans('Rename directory'),
+      type: 'normal',
+      id: 'menu.rename_dir',
+      enabled: true
+    },
+    {
+      label: trans('Delete directory'),
+      type: 'normal',
+      id: 'menu.delete_dir',
+      enabled: true
+    },
+    {
+      type: 'separator'
+    },
+    {
+      label: trans('Copy path'),
+      id: 'menu.copy_path',
+      type: 'normal',
+      enabled: true
+    },
+    {
+      type: 'separator'
+    },
+    {
+      label: isMac ? trans('Reveal in Finder') : isWin ? trans('Reveal in Explorer') : trans('Reveal in File Browser'),
+      type: 'normal',
+      id: 'gui.attachments_open_dir',
       enabled: true
     }
   ]
@@ -66,7 +85,7 @@ export default function displayFileContext (event: MouseEvent, dirObject: DirMet
     {
       id: 'menu.rescan_dir',
       type: 'normal',
-      label: trans('menu.rescan_dir'),
+      label: trans('Check for directory …'),
       enabled: true
     }
   ]
@@ -78,24 +97,24 @@ export default function displayFileContext (event: MouseEvent, dirObject: DirMet
   }
 
   // Now check for a project
-  if (dirObject.project !== null && dirObject.dirNotFoundFlag !== true) {
+  if (dirObject.settings.project !== null && dirObject.dirNotFoundFlag !== true) {
     template.push({ type: 'separator' })
     template.push({
       id: 'menu.project_build',
       type: 'normal',
-      label: trans('menu.project_build'),
-      // Only enable if there are formats to export to
-      enabled: dirObject.project.formats.length > 0
+      label: trans('Export Project'),
+      // Only enable if there are files and formats to export to
+      enabled: dirObject.settings.project.profiles.length > 0 && dirObject.settings.project.files.length > 0
     })
   }
 
   // Finally, check for it being root
-  if (dirObject.parent == null) {
+  if (dirObject.root) {
     template.push({ type: 'separator' })
     template.push({
       id: 'menu.close_workspace',
       type: 'normal',
-      label: trans('menu.close_workspace'),
+      label: trans('Close Workspace'),
       enabled: true
     })
   }
@@ -104,11 +123,14 @@ export default function displayFileContext (event: MouseEvent, dirObject: DirMet
   showPopupMenu(point, template, (clickedID) => {
     callback(clickedID) // TODO
     switch (clickedID) {
+      case 'menu.copy_path':
+        navigator.clipboard.writeText(dirObject.path).catch(err => console.error(err))
+        break
       case 'gui.attachments_open_dir':
         ipcRenderer.send('window-controls', {
           command: 'show-item-in-folder',
-          payload: dirObject.path
-        })
+          payload: { itemPath: dirObject.path }
+        } as WindowControlsIPCAPI)
         break
       case 'menu.project_build':
         ipcRenderer.send('message', {

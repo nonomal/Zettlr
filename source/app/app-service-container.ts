@@ -26,16 +26,15 @@ import FSAL from '@providers/fsal'
 import LinkProvider from '@providers/links'
 import LogProvider from '@providers/log'
 import MenuProvider from '@providers/menu'
-import NotificationProvider from '@providers/notifications'
-import ProviderContract from '@providers/provider-contract'
+import type ProviderContract from '@providers/provider-contract'
 import RecentDocumentsProvider from '@providers/recent-docs'
 import StatsProvider from '@providers/stats'
 import TagProvider from '@providers/tags'
 import TargetProvider from '@providers/targets'
-import TranslationProvider from '@providers/translations'
 import TrayProvider from '@providers/tray'
 import UpdateProvider from '@providers/updates'
 import WindowProvider from '@providers/windows'
+import WorkspaceProvider from '@providers/workspaces'
 import { dialog } from 'electron'
 
 export default class AppServiceContainer {
@@ -49,44 +48,52 @@ export default class AppServiceContainer {
   private readonly _linkProvider: LinkProvider
   private readonly _logProvider: LogProvider
   private readonly _menuProvider: MenuProvider
-  private readonly _notificationProvider: NotificationProvider
   private readonly _recentDocsProvider: RecentDocumentsProvider
   private readonly _statsProvider: StatsProvider
   private readonly _tagProvider: TagProvider
   private readonly _targetProvider: TargetProvider
-  private readonly _translationProvider: TranslationProvider
   private readonly _trayProvider: TrayProvider
   private readonly _updateProvider: UpdateProvider
   private readonly _windowProvider: WindowProvider
   private readonly _fsal: FSAL
   private readonly _documentManager: DocumentManager
+  private readonly _workspaces: WorkspaceProvider
 
   constructor () {
-    // NOTE: The log and config providers need to be instantiated first. The
-    // rest can be instantiated afterwards.
+    // NOTE: We need to instantiate the providers according to their dependence
+    // on other providers.
+
+    // First section: Crucial providers
     this._logProvider = new LogProvider()
     this._configProvider = new ConfigProvider(this._logProvider)
-    this._commandProvider = new CommandProvider(this)
-    // NOTE: This provider still produces side effects
-    this._translationProvider = new TranslationProvider(this._logProvider, this._configProvider)
-    this._assetsProvider = new AssetsProvider(this._logProvider)
-    this._tagProvider = new TagProvider(this._logProvider)
-    this._cssProvider = new CssProvider(this._logProvider)
-    this._notificationProvider = new NotificationProvider(this._logProvider)
-    this._statsProvider = new StatsProvider(this._logProvider)
+    this._fsal = new FSAL(this._logProvider, this._configProvider)
+
+    // Now according to their dependencies
     this._recentDocsProvider = new RecentDocumentsProvider(this._logProvider)
+    this._assetsProvider = new AssetsProvider(this._logProvider)
+    this._cssProvider = new CssProvider(this._logProvider)
+    this._statsProvider = new StatsProvider(this._logProvider)
+
     this._appearanceProvider = new AppearanceProvider(this._logProvider, this._configProvider)
     this._dictionaryProvider = new DictionaryProvider(this._logProvider, this._configProvider)
 
-    this._targetProvider = new TargetProvider(this._logProvider)
-    this._fsal = new FSAL(this._logProvider, this._configProvider, this._targetProvider, this._tagProvider)
-    this._linkProvider = new LinkProvider(this._logProvider, this._fsal)
+    this._workspaces = new WorkspaceProvider(this._logProvider, this._configProvider, this._fsal)
+    this._targetProvider = new TargetProvider(this._logProvider, this._fsal)
+    this._linkProvider = new LinkProvider(this._logProvider, this._workspaces)
+    
+    // The document provider accesses only the FSAL in its constructor
     this._documentManager = new DocumentManager(this)
+    this._tagProvider = new TagProvider(this._logProvider, this._documentManager, this._workspaces)
     this._windowProvider = new WindowProvider(this._logProvider, this._configProvider, this._documentManager)
-    this._citeprocProvider = new CiteprocProvider(this._logProvider, this._configProvider, this._notificationProvider, this._windowProvider)
+
+    this._citeprocProvider = new CiteprocProvider(this._logProvider, this._configProvider, this._windowProvider)
     this._trayProvider = new TrayProvider(this._logProvider, this._configProvider, this._windowProvider)
-    this._menuProvider = new MenuProvider(this._logProvider, this._configProvider, this._recentDocsProvider, this._commandProvider, this._windowProvider)
-    this._updateProvider = new UpdateProvider(this._logProvider, this._configProvider, this._notificationProvider, this._commandProvider)
+
+    // The command provider only needs the container for running the commands,
+    // none of which will run during the boot cycle.
+    this._commandProvider = new CommandProvider(this)
+    this._menuProvider = new MenuProvider(this._logProvider, this._configProvider, this._recentDocsProvider, this._commandProvider, this._windowProvider, this._documentManager)
+    this._updateProvider = new UpdateProvider(this._logProvider, this._configProvider, this._commandProvider, this._windowProvider)
   }
 
   /**
@@ -94,32 +101,54 @@ export default class AppServiceContainer {
    * application can be used.
    */
   async boot (): Promise<void> {
+    // NOTE: We need to boot the providers in roughly the same order as we
+    // instantiate them to ensure that their boot functions work properly. We
+    // can't do this in the exact same order, because the dependencies are only
+    // required for the variables, while the boot function may access them in
+    // different order.
     await this._informativeBoot(this._logProvider, 'LogProvider')
     await this._informativeBoot(this._configProvider, 'ConfigProvider')
-    await this._informativeBoot(this._translationProvider, 'TranslationProvider')
-    await this._informativeBoot(this._assetsProvider, 'AssetsProvider')
-    await this._informativeBoot(this._linkProvider, 'LinkProvider')
-    await this._informativeBoot(this._tagProvider, 'TagProvider')
-    await this._informativeBoot(this._targetProvider, 'TargetProvider')
-    await this._informativeBoot(this._cssProvider, 'CSSProvider')
-    await this._informativeBoot(this._notificationProvider, 'NotificationProvider')
-    await this._informativeBoot(this._statsProvider, 'StatsProvider')
+    await this._informativeBoot(this._fsal, 'FSAL')
+
     await this._informativeBoot(this._recentDocsProvider, 'RecentDocsProvider')
+    await this._informativeBoot(this._assetsProvider, 'AssetsProvider')
+    await this._informativeBoot(this._cssProvider, 'CSSProvider')
+    await this._informativeBoot(this._statsProvider, 'StatsProvider')
+
     await this._informativeBoot(this._appearanceProvider, 'AppearanceProvider')
+    await this._informativeBoot(this._dictionaryProvider, 'DictionaryProvider')
+
+    await this._informativeBoot(this._workspaces, 'WorkspaceProvider')
+    await this._informativeBoot(this._targetProvider, 'TargetProvider')
+    await this._informativeBoot(this._linkProvider, 'LinkProvider')
+
     // Boot the commands before the window provider to ensure the handler for
     // application requests from windows is registered before any window opens
     await this._informativeBoot(this._commandProvider, 'CommandProvider')
     await this._informativeBoot(this._windowProvider, 'WindowManager')
+
+    await this._informativeBoot(this._tagProvider, 'TagProvider')
     await this._informativeBoot(this._trayProvider, 'TrayProvider')
-    await this._informativeBoot(this._dictionaryProvider, 'DictionaryProvider')
-    await this._informativeBoot(this._menuProvider, 'MenuProvider')
     await this._informativeBoot(this._citeprocProvider, 'CiteprocProvider')
+    
+    await this._informativeBoot(this._documentManager, 'DocumentManager')
+    await this._informativeBoot(this._menuProvider, 'MenuProvider')
     await this._informativeBoot(this._updateProvider, 'UpdateProvider')
 
-    await this._informativeBoot(this._fsal, 'FSAL')
-    await this._informativeBoot(this._documentManager, 'DocumentManager')
-
     this._menuProvider.set() // TODO
+
+    this.log.info('[AppServiceContainer] Boot successful!')
+
+    // Now that the config provider is definitely set up, let's see if we
+    // should copy the interactive tutorial to the documents directory.
+    if (this.config.isFirstStart()) {
+      this.log.info('[AppServiceContainer] Copying over the interactive tutorial!')
+      this.commands.run('tutorial-open', {})
+        .catch(err => this.log.error('[AppServiceContainer] Could not open tutorial', err))
+    }
+
+    // After everything has been booted up, show the windows
+    this.windows.maybeShowWindows()
   }
 
   /**
@@ -168,11 +197,6 @@ export default class AppServiceContainer {
   public get menu (): MenuProvider { return this._menuProvider }
 
   /**
-   * Returns the notifications provider
-   */
-  public get notifications (): NotificationProvider { return this._notificationProvider }
-
-  /**
    * Returns the recent docs provider
    */
   public get recentDocs (): RecentDocumentsProvider { return this._recentDocsProvider }
@@ -191,11 +215,6 @@ export default class AppServiceContainer {
    * Returns the target provider
    */
   public get targets (): TargetProvider { return this._targetProvider }
-
-  /**
-   * Returns the translation provider
-   */
-  public get translations (): TranslationProvider { return this._translationProvider }
 
   /**
    * Returns the tray provider
@@ -228,6 +247,11 @@ export default class AppServiceContainer {
   public get commands (): CommandProvider { return this._commandProvider }
 
   /**
+   * Returns the WorkspaceProvider
+   */
+  public get workspaces (): WorkspaceProvider { return this._workspaces }
+
+  /**
    * Prepares quitting the app by shutting down the service providers
    */
   async shutdown (): Promise<void> {
@@ -238,9 +262,7 @@ export default class AppServiceContainer {
     await this._safeShutdown(this._windowProvider, 'WindowManager')
     await this._safeShutdown(this._trayProvider, 'TrayProvider')
     await this._safeShutdown(this._statsProvider, 'StatsProvider')
-    await this._safeShutdown(this._notificationProvider, 'NotificationProvider')
     await this._safeShutdown(this._updateProvider, 'UpdateProvider')
-    await this._safeShutdown(this._translationProvider, 'TranslationProvider')
     await this._safeShutdown(this._cssProvider, 'CSSProvider')
     await this._safeShutdown(this._targetProvider, 'TargetProvider')
     await this._safeShutdown(this._linkProvider, 'LinkProvider')
@@ -251,6 +273,7 @@ export default class AppServiceContainer {
     await this._safeShutdown(this._citeprocProvider, 'CiteprocProvider')
     await this._safeShutdown(this._assetsProvider, 'AssetsProvider')
     await this._safeShutdown(this._appearanceProvider, 'AppearanceProvider')
+    await this._safeShutdown(this._workspaces, 'WorkspaceProvider')
     await this._safeShutdown(this._configProvider, 'ConfigProvider')
     await this._safeShutdown(this._logProvider, 'LogProvider')
   }

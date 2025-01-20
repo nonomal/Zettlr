@@ -12,34 +12,40 @@
  * END HEADER
  */
 
-import TurndownService from '@joplin/turndown'
-import * as turndownGfm from 'joplin-turndown-plugin-gfm'
-
-// HTML to Markdown conversion is better done with Turndown.
-const converter = new TurndownService({
-  headingStyle: 'atx',
-  hr: '---',
-  blankReplacement: function (content: string, node: any) {
-    // A workaround solution for the whitespace deletion issue when copying HTML content
-    // from Chromium-based browsers. This method extends the default blankReplacement
-    // rule of Joplin-Turndown, all '<span> </span>' will not be replaced.
-    if (node.nodeName === 'SPAN') {
-      return ' '
-    }
-    return node.isBlock === true ? '\n\n' : ''
-  }
-})
-
-// Switch to GithubFlavored Markdown
-converter.use(turndownGfm.gfm)
+import rehypeParse from 'rehype-parse'
+import rehypeRemark from 'rehype-remark'
+import remarkStringify, { type Options } from 'remark-stringify'
+import rehypeRemoveComments from 'rehype-remove-comments'
+import { unified } from 'unified'
 
 /**
  * Turns the given HTML string to Markdown
  *
- * @param   {string}  html  The HTML input
+ * @param   {string}  html              The HTML input
+ * @param   {boolean} stripComments     Whether to strip comments from the HTML
+ *                                      source. Defaults to false.
+ * @param   {Options} stringifyOptions  Optional options to be passed to remarkStringify
  *
- * @return  {string}        The converted Markdown
+ * @return  {Promise<string>}           The converted Markdown
  */
-export default function html2md (html: string): string {
-  return converter.turndown(html)
+export default async function html2md (html: string, stripComments = false, stringifyOptions?: Options): Promise<string> {
+  const procRetainComments = unified()
+    // @ts-expect-error The types on remark are wonky
+    .use(rehypeParse)
+    .use(rehypeRemark)
+    // @ts-expect-error The types on remark are wonky
+    .use(remarkStringify, stringifyOptions)
+
+  const procRemoveComments = unified()
+    // @ts-expect-error The types on remark are wonky
+    .use(rehypeParse)
+    .use(rehypeRemoveComments, { removeConditional: true })
+    .use(rehypeRemark)
+    // @ts-expect-error The types on remark are wonky
+    .use(remarkStringify, stringifyOptions)
+
+  const proc = stripComments ? procRemoveComments : procRetainComments
+
+  const file = await proc.process(html)
+  return String(file)
 }

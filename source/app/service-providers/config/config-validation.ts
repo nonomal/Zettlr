@@ -15,31 +15,27 @@
 import { trans } from '@common/i18n-main'
 
 const RULES = {
-  'darkMode': 'required|boolean|default:false',
-  'autoDarkMode': 'required|string|in:off,system,schedule,auto|default:off',
-  'fileMeta': 'required|boolean|default:true',
-  'sorting': 'required|string|in:natural,ascii|default:natural',
-  'sortingTime': 'required|string|in:modtime,creationtime|default:modtime',
-  'newFileNamePattern': 'required|string|default:%id.md',
-  'appLang': 'required|string|min:5|max:7|default:en_US',
-  'fileManagerMode': 'required|string|in:thin,expanded,combined|default:thin',
-  'muteLines': 'required|boolean|default:false',
+  darkMode: 'required|boolean|default:false',
+  autoDarkMode: 'required|string|in:off,system,schedule,auto|default:off',
+  fileMeta: 'required|boolean|default:true',
+  sorting: 'required|string|in:natural,ascii|default:natural',
+  newFileNamePattern: 'required|string|default:%id.md',
+  appLang: 'required|string|min:5|max:7|default:en_US',
+  fileManagerMode: 'required|string|in:thin,expanded,combined|default:thin',
+  muteLines: 'required|boolean|default:false',
   'export.dir': 'required|string|in:temp,cwd|default:temp',
   'export.stripTags': 'required|boolean|default:false',
   'export.stripLinks': 'required|string|in:full,unlink,no|default:full',
   'zkn.idRE': 'required|string|default:',
-  'zkn.linkStart': 'required|string|default:',
-  'zkn.linkEnd': 'required|string|default:',
   'zkn.idGen': 'required|string|min:2|default:',
-  'zkn.autoCreateLinkedFiles': 'required|boolean|default:false',
-  'attachmentExtensions': 'optional|array',
-  'debug': 'required|boolean|default:false',
-  'title': 'required|string|default:',
+  attachmentExtensions: 'optional|array',
+  debug: 'required|boolean|default:false',
+  title: 'required|string|default:',
   'editor.indentUnit': 'required|number|min:1|max:24',
   'editor.boldFormatting': 'required|string|in:__,**|default:**',
   'editor.italicFormatting': 'required|string|in:_,*|default:_',
   'editor.readabilityAlgorithm': 'required|string|in:dale-chall,gunning-fog,coleman-liau,automated-readability|default:dale-chall',
-  'cslLibrary': 'optional|string|default:',
+  cslLibrary: 'optional|string|default:',
   'display.imageWidth': 'required|number|min:1|max:100|default:100',
   'display.imageHeight': 'required|number|min:1|max:100|default:100',
   'watchdog.stabilityThreshold': 'optional|number|min:1|max:100000|default:1000'
@@ -65,7 +61,7 @@ export function validate (data: any): ValidationError[] {
       const rule = VALIDATE_RULES[VALIDATE_PROPERTIES.indexOf(key)]
       const val = new ValidationRule(key, rule)
       if (!val.validate(data[key])) {
-        unvalidated.push({ key: key, reason: val.why() })
+        unvalidated.push({ key, reason: val.why() })
       }
     }
   }
@@ -279,22 +275,22 @@ export class ValidationRule {
   why (): string {
     // Returns a message explaining why the validation failed.
     if (!this.isTypeCorrect()) {
-      return trans('validation.error_type', this._option, this._type)
+      return trans('Option %s has to be of type %s.', this._option, this._type)
     }
     if (!this.isValueCorrect()) {
-      return trans('validation.error_value', this._option, this._in.join(', '))
+      return trans('Option %s must be one of: %s.', this._option, this._in.join(', '))
     }
     if (!this.isInRange() && this._min !== undefined && this._max !== undefined) {
-      return trans('validation.error_range_both', this._option, this._min, this._max)
+      return trans('Option %s must be between %s and %s (characters long).', this._option, this._min, this._max)
     }
     if (!this.isInRange() && this._min === undefined && this._max !== undefined) {
-      return trans('validation.error_range_max', this._option, this._max)
+      return trans('Option %s may not exceed %s (characters).', this._option, this._max)
     }
     if (!this.isInRange() && this._min !== undefined && this._max === undefined) {
-      return trans('validation.error_range_min', this._option, this._min)
+      return trans('Option %s must be at least %s (characters long).', this._option, this._min)
     }
     if (this.isEmpty() && this.isRequired()) {
-      return trans('validation.error_empty', this._option)
+      return trans('Option %s is required.', this._option)
     }
     return '' // Failsafe
   }

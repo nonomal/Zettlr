@@ -1,4 +1,5 @@
 const CopyWebpackPlugin = require('copy-webpack-plugin')
+const { DefinePlugin } = require('webpack')
 const path = require('path')
 const rules = require('./webpack.rules')
 
@@ -16,6 +17,7 @@ if (process.env.BUNDLE_FSEVENTS !== '1') {
 module.exports = {
   // Main entry point: the file that runs in the main process
   entry: './source/main.ts',
+  mode: process.env.NODE_ENV === 'production' ? 'production' : 'development',
   module: { rules },
   plugins: [
     new CopyWebpackPlugin({
@@ -28,12 +30,13 @@ module.exports = {
         { from: 'static/csl-locales', to: 'assets/csl-locales' },
         { from: 'static/csl-styles', to: 'assets/csl-styles' },
         { from: 'static/defaults', to: 'assets/defaults' },
-        { from: 'static/template.revealjs.htm', to: 'assets' },
-        { from: 'static/revealjs-styles', to: 'assets/revealjs-styles' },
         { from: 'static/lua-filter', to: 'assets/lua-filter' },
         { from: 'resources/icons/icon.ico', to: 'assets/icons' },
         { from: 'resources/icons/png', to: 'assets/icons/png' }
       ]
+    }),
+    new DefinePlugin({
+      __GIT_COMMIT_HASH__: JSON.stringify(process.env.GIT_COMMIT_HASH)
     })
   ],
   resolve: {
@@ -58,5 +61,5 @@ module.exports = {
       '@dts': [path.resolve(__dirname, 'source/types')]
     }
   },
-  externals: externals
+  externals
 }

@@ -15,7 +15,7 @@
  * END HEADER
  */
 
-import { Candidate } from './find-lang-candidates'
+import { type Candidate } from './find-lang-candidates'
 import path from 'path'
 import * as bcp47 from 'bcp-47/index.js'
 import fs from 'fs'
@@ -54,7 +54,7 @@ export default function enumDictFiles (paths = [ path.join(app.getPath('userData
         // Only add the found dictionary if it is not already present. Useful
         // to override the shipped dictionaries.
         if (candidates.find(elem => elem.tag === dir) === undefined) {
-          candidates.push({ 'tag': dir, 'aff': aff, 'dic': dic })
+          candidates.push({ tag: dir, aff, dic })
         }
       }
     }

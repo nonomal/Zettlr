@@ -1,64 +1,124 @@
 <template>
   <WindowChrome
-    v-bind:title="title"
+    v-bind:title="'Zettlr'"
     v-bind:titlebar="shouldShowTitlebar"
     v-bind:menubar="true"
     v-bind:show-toolbar="shouldShowToolbar"
     v-bind:toolbar-labels="false"
     v-bind:toolbar-controls="toolbarControls"
+    v-bind:disable-vibrancy="!vibrancyEnabled"
     v-on:toolbar-toggle="handleToggle($event)"
     v-on:toolbar-click="handleClick($event)"
   >
     <SplitView
-      ref="file-manager-split"
-      v-bind:initial-size-percent="[ 20, 80 ]"
+      ref="fileManagerSplitComponent"
+      v-bind:initial-size-percent="fileManagerSplitComponentInitialSize"
       v-bind:minimum-size-percent="[ 10, 50 ]"
+      v-bind:reset-size-percent="[ 20, 80 ]"
       v-bind:split="'horizontal'"
+      v-on:views-resized="fileManagerSplitComponentResized($event)"
     >
       <template #view1>
         <!-- File manager in the left side of the split view -->
         <FileManager
           v-show="mainSplitViewVisibleComponent === 'fileManager'"
           ref="file-manager"
+          v-bind:window-id="windowId"
         ></FileManager>
         <!-- ... or the global search, if selected -->
         <GlobalSearch
           v-show="mainSplitViewVisibleComponent === 'globalSearch'"
-          ref="global-search"
-          v-on:jtl="($refs.editor as any).jtl($event)"
+          ref="globalSearchComponent"
+          v-bind:window-id="windowId"
+          v-on:jtl="(filePath, lineNumber, newTab) => jtl(filePath, lineNumber, newTab)"
         >
         </GlobalSearch>
       </template>
       <template #view2>
         <!-- Another split view in the right side -->
         <SplitView
-          ref="editor-sidebar-split"
-          v-bind:initial-size-percent="[ 80, 20 ]"
+          ref="editorSidebarSplitComponent"
+          v-bind:initial-size-percent="editorSidebarSplitComponentInitialSize"
           v-bind:minimum-size-percent="[ 50, 10 ]"
+          v-bind:reset-size-percent="[ 80, 20 ]"
           v-bind:split="'horizontal'"
+          v-on:views-resized="editorSidebarSplitComponentResized($event)"
         >
           <template #view1>
             <!-- First side: Editor -->
-            <DocumentTabs
-              v-show="!distractionFree"
-            ></DocumentTabs>
-            <MainEditor
-              ref="editor"
-              v-bind:readability-mode="readabilityActive"
-              v-bind:distraction-free="distractionFree"
-            ></MainEditor>
+            <EditorPane
+              v-if="paneConfiguration?.type === 'leaf'"
+              v-bind:node="paneConfiguration"
+              v-bind:leaf-id="paneConfiguration.id"
+              v-bind:editor-commands="editorCommands"
+              v-bind:window-id="windowId"
+              v-on:global-search="startGlobalSearch($event)"
+            ></EditorPane>
+            <EditorBranch
+              v-else-if="paneConfiguration !== undefined"
+              v-bind:node="paneConfiguration"
+              v-bind:window-id="windowId"
+              v-bind:editor-commands="editorCommands"
+              v-bind:is-last="true"
+              v-on:global-search="startGlobalSearch($event)"
+            ></EditorBranch>
           </template>
           <template #view2>
             <!-- Second side: Sidebar -->
-            <MainSidebar></MainSidebar>
+            <MainSidebar
+              v-on:move-section="moveSection($event)"
+              v-on:jump-to-line="genericJtl($event)"
+            ></MainSidebar>
           </template>
         </SplitView>
       </template>
     </SplitView>
   </WindowChrome>
+
+  <!-- Popover area: these will be teleported to the body element anyhow -->
+  <PopoverExport
+    v-if="showExportPopover && exportButton !== null && activeFile !== undefined"
+    v-bind:target="exportButton"
+    v-bind:file-path="activeFile.path"
+    v-on:close="showExportPopover = false"
+  ></PopoverExport>
+  <PopoverStats
+    v-if="showStatsPopover && statsButton !== null"
+    v-bind:target="statsButton"
+    v-on:close="showStatsPopover = false"
+  ></PopoverStats>
+  <PopoverTags
+    v-if="showTagsPopover && tagsButton !== null"
+    v-bind:target="tagsButton"
+    v-on:close="showTagsPopover = false"
+    v-on:search-tag="startGlobalSearch($event)"
+  ></PopoverTags>
+  <PopoverTable
+    v-if="showTablePopover && tableButton !== null"
+    v-bind:target="tableButton"
+    v-on:close="showTablePopover = false"
+    v-on:insert-table="insertTable($event)"
+  ></PopoverTable>
+  <PopoverDocInfo
+    v-if="showDocInfoPopover && docInfoButton !== null && windowStateStore.activeDocumentInfo != null"
+    v-bind:target="docInfoButton"
+    v-bind:doc-info="windowStateStore.activeDocumentInfo"
+    v-bind:should-count-chars="shouldCountChars"
+    v-on:close="showDocInfoPopover = false"
+  ></PopoverDocInfo>
+  <PopoverPomodoro
+    v-if="showPomodoroPopover && pomodoroButton !== null"
+    v-bind:target="pomodoroButton"
+    v-bind:pomodoro="pomodoro"
+    v-bind:sound-effects="SOUND_EFFECTS"
+    v-on:close="showPomodoroPopover = false"
+    v-on:config="setPomodoroConfig($event)"
+    v-on:start="startPomodoro()"
+    v-on:stop="stopPomodoro()"
+  ></PopoverPomodoro>
 </template>
 
-<script lang="ts">
+<script setup lang="ts">
 /**
  * @ignore
  * BEGIN HEADER
@@ -73,13 +133,13 @@
  * END HEADER
  */
 
-import WindowChrome from '@common/vue/window/Chrome.vue'
-import FileManager from './file-manager/file-manager.vue'
-import MainSidebar from './MainSidebar.vue'
-import DocumentTabs from './DocumentTabs.vue'
+import WindowChrome from '@common/vue/window/WindowChrome.vue'
+import FileManager from './file-manager/FileManager.vue'
+import MainSidebar from './sidebar/MainSidebar.vue'
+import EditorPane from './EditorPane.vue'
+import EditorBranch from './EditorBranch.vue'
 import SplitView from '../common/vue/window/SplitView.vue'
 import GlobalSearch from './GlobalSearch.vue'
-import MainEditor from './MainEditor.vue'
 import PopoverExport from './PopoverExport.vue'
 import PopoverStats from './PopoverStats.vue'
 import PopoverTags from './PopoverTags.vue'
@@ -89,16 +149,33 @@ import PopoverDocInfo from './PopoverDocInfo.vue'
 import { trans } from '@common/i18n-renderer'
 import localiseNumber from '@common/util/localise-number'
 import generateId from '@common/util/generate-id'
-import { nextTick, defineComponent } from 'vue'
+import {
+  nextTick,
+  ref,
+  computed,
+  watch,
+  onMounted,
+  onBeforeMount
+} from 'vue'
 
 // Import the sound effects for the pomodoro timer
 import glassFile from './assets/glass.wav'
 import alarmFile from './assets/digital_alarm.mp3'
 import chimeFile from './assets/chime.mp3'
-import { ToolbarControl } from '@dts/renderer/window'
+import { type LeafNodeJSON } from '@dts/common/documents'
+import buildPipeTable from '@common/modules/markdown-editor/table-editor/build-pipe'
+import { type UpdateState } from '@providers/updates'
+import { type ToolbarControl } from '@common/vue/window/WindowToolbar.vue'
+import { useConfigStore, useDocumentTreeStore, useWindowStateStore } from 'source/pinia'
+import type { ConfigOptions } from 'source/app/service-providers/config/get-config-template'
+import { type AnyDescriptor } from 'source/types/common/fsal'
+import type { DocumentManagerIPCAPI } from 'source/app/service-providers/documents'
 
 const ipcRenderer = window.ipc
-const clipboard = window.clipboard
+
+const configStore = useConfigStore()
+const documentTreeStore = useDocumentTreeStore()
+const windowStateStore = useWindowStateStore()
 
 const SOUND_EFFECTS = [
   {
@@ -115,660 +192,779 @@ const SOUND_EFFECTS = [
   }
 ]
 
-export default defineComponent({
-  components: {
-    WindowChrome,
-    FileManager,
-    DocumentTabs,
-    SplitView,
-    MainEditor,
-    GlobalSearch,
-    MainSidebar
-  },
-  data: function () {
-    return {
-      title: 'Zettlr',
-      readabilityActive: false,
-      fileManagerVisible: true,
-      distractionFree: false,
-      mainSplitViewVisibleComponent: 'fileManager',
-      // Pomodoro state
-      pomodoro: {
-        currentEffectFile: glassFile,
-        soundEffect: new Audio(glassFile),
-        intervalHandle: undefined as undefined|ReturnType<typeof setInterval>,
-        popover: undefined as any,
-        durations: {
-          task: 1500,
-          short: 300,
-          long: 1200
-        },
-        phase: {
-          type: 'task' as 'task'|'short'|'long',
-          elapsed: 0
-        },
-        counter: {
-          task: 0,
-          short: 0,
-          long: 0
-        },
-        colour: {
-          task: '#ff3366',
-          short: '#ddff00',
-          long: '#33ffcc'
-        }
-      },
-      sidebarsBeforeDistractionfree: {
-        fileManager: true,
-        sidebar: false
-      }
-    }
-  },
-  computed: {
-    sidebarVisible: function (): boolean {
-      return this.$store.state.config['window.sidebarVisible']
-    },
-    shouldCountChars: function (): boolean {
-      return this.$store.state.config['editor.countChars']
-    },
-    shouldShowToolbar: function (): boolean {
-      return this.distractionFree === false || this.$store.state.config['display.hideToolbarInDistractionFree'] === false
-    },
-    shouldShowTitlebar: function (): boolean {
-      // We need to display the titlebar in case the user decides to hide the
-      // toolbar. The titlebar is much less distracting, but this way the user
-      // can at least drag the window around.
-      return this.shouldShowToolbar === false
-    },
-    parsedDocumentInfo: function (): any {
-      const info = this.$store.state.activeDocumentInfo
-      if (info === null) {
-        return ''
-      }
+const searchParams = new URLSearchParams(window.location.search)
+// The window number indicates which main window this one here is. This is only
+// necessary for the documents and split views to show up.
+const windowId = searchParams.get('window_id')!
 
-      let cnt = ''
+const fileManagerVisible = ref(true)
+const mainSplitViewVisibleComponent = ref<'fileManager'|'globalSearch'>('fileManager')
+const isUpdateAvailable = ref(false)
+const vibrancyEnabled = ref(configStore.config.window.vibrancy)
 
-      if (info.selections.length > 0) {
-        // We have selections to display.
-        let length = 0
-        info.selections.forEach((sel: any) => {
-          length += sel.selectionLength
-        })
+// Ensure the app remembers the previous sidebar sizes
+const fileManagerSplitComponentInitialSize = ref<[number, number]>([ 20, 80 ])
+const editorSidebarSplitComponentInitialSize = ref<[number, number]>([ 80, 20 ])
+onBeforeMount(() => {
+  fileManagerSplitComponentInitialSize.value = configStore.config.ui.fileManagerSplitSize
+  editorSidebarSplitComponentInitialSize.value = configStore.config.ui.editorSidebarSplitSize
+})
 
-        cnt = trans('gui.words_selected', localiseNumber(length))
-        cnt += '<br>'
-        if (info.selections.length === 1) {
-          cnt += (info.selections[0].start.line + 1) + ':'
-          cnt += (info.selections[0].start.ch + 1) + ' &ndash; '
-          cnt += (info.selections[0].end.line + 1) + ':'
-          cnt += (info.selections[0].end.ch + 1)
-        } else {
-          // Multiple selections --> indicate
-          cnt += trans('gui.number_selections', info.selections.length)
-        }
-      } else {
-        // No selection.
-        const locID = (this.shouldCountChars === true) ? 'gui.chars' : 'gui.words'
-        const num = (this.shouldCountChars === true) ? info.chars : info.words
-        cnt = trans(locID, localiseNumber(num))
-        cnt += '<br>'
-        cnt += (info.cursor.line + 1) + ':' + (info.cursor.ch + 1)
-      }
+// Popover targets
+const exportButton = ref<HTMLElement|null>(null)
+const showExportPopover = ref<boolean>(false)
+const statsButton = ref<HTMLElement|null>(null)
+const showStatsPopover = ref<boolean>(false)
+const tagsButton = ref<HTMLElement|null>(null)
+const showTagsPopover = ref<boolean>(false)
+const tableButton = ref<HTMLElement|null>(null)
+const showTablePopover = ref<boolean>(false)
+const docInfoButton = ref<HTMLElement|null>(null)
+const showDocInfoPopover = ref<boolean>(false)
+const pomodoroButton = ref<HTMLElement|null>(null)
+const showPomodoroPopover = ref<boolean>(false)
 
-      return cnt
-    },
-    hasTagSuggestions: function (): boolean {
-      return this.$store.state.tagSuggestions.length > 0
-    },
-    toolbarControls: function (): ToolbarControl[] {
-      return [
-        {
-          type: 'three-way-toggle',
-          id: 'toggle-file-manager',
-          stateOne: {
-            id: 'fileManager',
-            title: trans('toolbar.toggle_file_manager'),
-            icon: 'hard-disk'
-          },
-          stateTwo: {
-            id: 'globalSearch',
-            title: trans('toolbar.toggle_global_search'),
-            icon: 'search'
-          },
-          initialState: (this.fileManagerVisible === true) ? this.mainSplitViewVisibleComponent : undefined
-        },
-        {
-          type: 'button',
-          id: 'root-open-workspaces',
-          title: trans('menu.open_workspace'),
-          icon: 'folder-open'
-        },
-        {
-          type: 'button',
-          id: 'show-stats',
-          title: trans('toolbar.stats'),
-          icon: 'line-chart'
-        },
-        {
-          type: 'button',
-          id: 'show-tag-cloud',
-          title: trans('toolbar.tag_cloud'),
-          icon: 'tags',
-          badge: this.hasTagSuggestions
-        },
-        {
-          type: 'button',
-          id: 'open-preferences',
-          title: trans('toolbar.preferences'),
-          icon: 'cog'
-        },
-        {
-          type: 'spacer',
-          id: 'spacer-one'
-        },
-        {
-          type: 'button',
-          class: 'share',
-          id: 'export',
-          title: trans('toolbar.share'),
-          icon: 'export'
-        },
-        {
-          type: 'toggle',
-          id: 'toggle-readability',
-          title: trans('toolbar.readability'),
-          icon: 'eye'
-        },
-        {
-          type: 'spacer',
-          id: 'spacer-two',
-          size: '1x'
-        },
-        {
-          type: 'button',
-          id: 'markdownComment',
-          title: trans('gui.formatting.comment'),
-          icon: 'code'
-        },
-        {
-          type: 'button',
-          id: 'markdownLink',
-          title: trans('gui.formatting.link'),
-          icon: 'link'
-        },
-        {
-          type: 'button',
-          id: 'markdownImage',
-          title: trans('gui.formatting.image'),
-          icon: 'image'
-        },
-        {
-          type: 'button',
-          id: 'markdownMakeTaskList',
-          title: trans('gui.formatting.tasklist'),
-          icon: 'checkbox-list'
-        },
-        {
-          type: 'button',
-          id: 'insert-table',
-          title: trans('gui.formatting.insert_table'),
-          icon: 'table'
-        },
-        {
-          type: 'button',
-          id: 'insertFootnote',
-          title: trans('gui.formatting.footnote'),
-          icon: 'footnote'
-        },
-        {
-          type: 'spacer',
-          id: 'spacer-three'
-        },
-        {
-          type: 'text',
-          align: 'center',
-          id: 'document-info',
-          content: this.parsedDocumentInfo
-        },
-        {
-          type: 'ring',
-          id: 'pomodoro',
-          title: trans('toolbar.pomodoro'),
-          // Good morning, we are verbose here
-          progressPercent: this.pomodoro.phase.elapsed / this.pomodoro.durations[this.pomodoro.phase.type] * 100,
-          colour: this.pomodoro.colour[this.pomodoro.phase.type]
-        },
-        {
-          type: 'toggle',
-          id: 'toggle-sidebar',
-          title: trans('menu.toggle_sidebar'),
-          icon: 'view-columns',
-          initialState: this.sidebarVisible ? 'active' : ''
-        }
-      ]
-    },
-    editorSidebarSplitComponent: function (): any {
-      return this.$refs['editor-sidebar-split'] as any
-    },
-    fileManagerSplitComponent: function (): any {
-      return this.$refs['file-manager-split'] as any
-    },
-    globalSearchComponent: function (): any {
-      return this.$refs['global-search'] as any
-    }
-  },
-  watch: {
-    sidebarVisible: function (newValue, oldValue) {
-      if (newValue === true) {
-        if (this.distractionFree === true) {
-          this.distractionFree = false
-        }
+export interface PomodoroConfig {
+  currentEffectFile: string
+  soundEffect: HTMLAudioElement
+  intervalHandle: ReturnType<typeof setInterval>|undefined
+  popover: any
+  durations: {
+    task: number
+    short: number
+    long: number
+  }
+  phase: {
+    type: 'task'|'short'|'long'
+    elapsed: number
+  }
+  counter: {
+    task: number
+    short: number
+    long: number
+  }
+  colour: {
+    task: string
+    short: string
+    long: string
+  }
+}
 
-        this.editorSidebarSplitComponent.unhide()
-      } else {
-        this.editorSidebarSplitComponent.hideView(2)
-      }
-    },
-    fileManagerVisible: function (newValue, oldValue) {
-      if (newValue === true) {
-        if (this.distractionFree === true) {
-          this.distractionFree = false
-        }
+const pomodoro = ref<PomodoroConfig>({
+  currentEffectFile: glassFile,
+  soundEffect: new Audio(glassFile),
+  intervalHandle: undefined,
+  popover: undefined,
+  durations: { task: 1500, short: 300, long: 1200 },
+  phase: { type: 'task', elapsed: 0 },
+  counter: { task: 0, short: 0, long: 0 },
+  colour: { task: '#ff3366', short: '#ddff00', long: '#33ffcc' }
+})
 
-        this.fileManagerSplitComponent.unhide()
-      } else {
-        this.fileManagerSplitComponent.hideView(1)
-      }
-    },
-    mainSplitViewVisibleComponent: function (newValue, oldValue) {
-      if (newValue === 'globalSearch') {
-        // The global search just became visible, so make sure to change the
-        // current directory.
-        nextTick().then(() => {
-          this.globalSearchComponent.setCurrentDirectory()
-        }).catch(e => console.error(e))
-      }
-    }
-  },
-  mounted: function () {
-    ipcRenderer.on('shortcut', (event, shortcut, state) => {
-      if (shortcut === 'toggle-sidebar') {
-        (global as any).config.set('window.sidebarVisible', !this.sidebarVisible)
-      } else if (shortcut === 'insert-id') {
-        // Generates an ID based upon the configured pattern, writes it into the
-        // clipboard and then triggers the paste command on these webcontents.
+/**
+ * Okay, hear me out. We have the following situation: We have a toolbar, and
+ * external components that want to tell the main editor to do something. But
+ * Vue doesn't have a concept of events being passed down to child components
+ * and since editors may now be nested arbitrarily deep, we have no direct way
+ * of accessing the editors and tell them to do something. Basically, Vue's data
+ * flow goes like this: Events flow up, and props flow down. That's it. So we're
+ * using this hacky solution "misusing" props as events. This interface
+ * represents all the potential editor commands that can be issued. The last
+ * property can contain arbitrary data if required by the command. We'll be
+ * passing this struct as a prop down to every EditorBranch and EditorPane into
+ * the main editor components. Every editor instance then listens to these
+ * events by watching property changes (i.e. when moveSection switches from true
+ * to false) and testing if they are the last editor (the only identifying info
+ * we can store in the state to not break things due to Vue's aggressive
+ * reactivity). Then, the editors can act based on this info.
+ *
+ * One example:
+ * 1. The app receives a jump to line-command. It then writes the necessary info
+ *    (in this case, which line to jump to) into the `data` prop. That is not
+ *    watched by the editors, but since it's part of the data structure, it will
+ *    silently update in the background.
+ * 2. Then, the app switches the jumpToLine-property (false->true or otherwise).
+ *    Since that sub-property is being watched by the editors, it will trigger
+ *    the watcher that then checks the lastLeafId in the state. If that
+ *    corresponds to the editor's leaf ID, the editor calls the appropriate
+ *    function locally, and executes the command, providing the data.
+ */
+export interface EditorCommands {
+  jumpToLine: boolean
+  moveSection: boolean
+  readabilityMode: boolean
+  addKeywords: boolean
+  replaceSelection: boolean
+  executeCommand: boolean
+  data: any
+}
 
-        // First we need to backup the existing clipboard contents
-        // so that they are not lost during the operation.
-        let text = clipboard.readText()
-        let html = clipboard.readHTML()
-        let rtf = clipboard.readRTF()
+// Editor commands state
+const editorCommands = ref<EditorCommands>({
+  jumpToLine: false,
+  moveSection: false,
+  readabilityMode: false,
+  addKeywords: false,
+  replaceSelection: false,
+  executeCommand: false,
+  data: undefined
+})
 
-        // Write an ID to the clipboard
-        clipboard.writeText(generateId((global as any).config.get('zkn.idGen')))
-        // Paste the ID
-        ipcRenderer.send('window-controls', { command: 'paste' })
+const sidebarsBeforeDistractionfree = ref<{ fileManager: boolean, sidebar: boolean }>({
+  fileManager: true,
+  sidebar: false
+})
 
-        // Now restore the clipboard's original contents
-        setTimeout((e) => {
-          clipboard.write({
-            'text': text,
-            'html': html,
-            'rtf': rtf
-          })
-        }, 10) // Why do a timeout? Because the paste event is asynchronous.
-      } else if (shortcut === 'copy-current-id') {
-        const activeFile = this.$store.state.activeFile
+const sidebarVisible = computed<boolean>(() => configStore.config.window.sidebarVisible)
+const activeFile = computed(() => documentTreeStore.lastLeafActiveFile)
+const shouldCountChars = computed<boolean>(() => configStore.config.editor.countChars)
+const shouldShowToolbar = computed<boolean>(() => !distractionFree.value || !configStore.config.display.hideToolbarInDistractionFree)
+// We need to display the titlebar in case the user decides to hide the toolbar.
+// The titlebar is much less distracting, but this way the user can at least
+// drag the window around.
+const shouldShowTitlebar = computed<boolean>(() => !shouldShowToolbar.value)
+const parsedDocumentInfo = computed<string>(() => {
+  const info = windowStateStore.activeDocumentInfo
+  if (info == null) {
+    return ''
+  }
 
-        if (activeFile !== null && activeFile.id !== '') {
-          clipboard.writeText(activeFile.id)
-        }
-      } else if (shortcut === 'global-search') {
-        this.fileManagerVisible = true
-        this.mainSplitViewVisibleComponent = 'globalSearch'
-        // Focus input
-        if (this.$refs['global-search'] !== undefined) {
-          nextTick()
-            .then(() => { this.globalSearchComponent.focusQueryInput() })
-            .catch(err => console.error(err))
-        }
-      } else if (shortcut === 'toggle-file-manager') {
-        if (this.fileManagerVisible === true && this.mainSplitViewVisibleComponent === 'fileManager') {
-          this.fileManagerVisible = false
-        } else if (this.fileManagerVisible === false) {
-          this.fileManagerVisible = true
-          this.mainSplitViewVisibleComponent = 'fileManager'
-        } else if (this.mainSplitViewVisibleComponent === 'globalSearch') {
-          this.mainSplitViewVisibleComponent = 'fileManager'
-        }
-      } else if (shortcut === 'filter-files') {
-        // We need to immediately make the file manager visible, which will
-        // -- in the next tick -- focus its filter input.
-        this.fileManagerVisible = true
-        this.mainSplitViewVisibleComponent = 'fileManager'
-      } else if (shortcut === 'export') {
-        this.showExportPopover()
-      } else if (shortcut === 'toggle-distraction-free') {
-        if (this.distractionFree === false) {
-          // Enter distraction free mode
-          this.sidebarsBeforeDistractionfree = {
-            fileManager: this.fileManagerVisible,
-            sidebar: this.sidebarVisible
-          }
+  let cnt = ''
 
-          this.distractionFree = true
-          ;(global as any).config.set('window.sidebarVisible', false)
-          this.fileManagerVisible = false
-        } else {
-          // Leave distraction free mode
-          this.distractionFree = false
-          ;(global as any).config.set('window.sidebarVisible', this.sidebarsBeforeDistractionfree.sidebar)
-          this.fileManagerVisible = this.sidebarsBeforeDistractionfree.fileManager
-        }
-      }
+  if (info.selections.length > 0) {
+    // We have selections to display.
+    let length = 0
+    info.selections.forEach((sel: any) => {
+      length += shouldCountChars.value ? sel.chars : sel.words
     })
 
-    // Initially, we need to hide the sidebar, since the view will be visible
-    // by default.
-    if (!this.sidebarVisible) {
-      this.editorSidebarSplitComponent.hideView(2)
+    cnt = trans('%s selected', localiseNumber(length))
+    cnt += '<br>'
+    if (info.selections.length === 1) {
+      cnt += (info.selections[0].anchor.line) + ':'
+      cnt += (info.selections[0].anchor.ch) + ' &ndash; '
+      cnt += (info.selections[0].head.line) + ':'
+      cnt += (info.selections[0].head.ch)
+    } else {
+      // Multiple selections --> indicate
+      cnt += trans('%s selections', info.selections.length)
     }
-  },
-  methods: {
-    jtl: function (lineNumber: number, setCursor: boolean = false) {
-      (this.$refs.editor as any).jtl(lineNumber, setCursor)
+  } else {
+    // No selection.
+    cnt = shouldCountChars.value
+      ? trans('%s characters', localiseNumber(info.chars))
+      : trans('%s words', localiseNumber(info.words))
+    cnt += '<br>'
+    cnt += info.cursor.line + ':' + info.cursor.ch
+  }
+
+  return cnt
+})
+
+const toolbarControls = computed<ToolbarControl[]>(() => {
+  return [
+    {
+      type: 'three-way-toggle',
+      id: 'toggle-file-manager',
+      stateOne: {
+        id: 'fileManager',
+        title: trans('File manager'),
+        icon: 'hard-disk'
+      },
+      stateTwo: {
+        id: 'globalSearch',
+        title: trans('Global search'),
+        icon: 'search'
+      },
+      initialState: (fileManagerVisible.value) ? mainSplitViewVisibleComponent.value : undefined
     },
-    startGlobalSearch: function (terms: string) {
-      this.mainSplitViewVisibleComponent = 'globalSearch'
-      this.fileManagerVisible = true
-      nextTick()
-        .then(() => {
-          this.globalSearchComponent.$data.query = terms
-          this.globalSearchComponent.startSearch()
-        })
-        .catch(err => console.error(err))
+    {
+      type: 'button',
+      id: 'root-open-workspaces',
+      title: trans('Open Workspace …'),
+      icon: 'folder-open'
     },
-    toggleFileList: function () {
-      // This event can be used by various components to ask the file manager to
-      // toggle its file list visibility
-      (this.$refs['file-manager'] as any).toggleFileList()
+    {
+      type: 'button',
+      id: 'show-stats',
+      title: trans('View stats'),
+      icon: 'line-chart'
     },
-    handleClick: function (clickedID: string) {
-      if (clickedID === 'root-open-workspaces') {
-        ipcRenderer.invoke('application', { command: 'root-open-workspaces' })
-          .catch(e => console.error(e))
-      } else if (clickedID === 'open-preferences') {
-        ipcRenderer.invoke('application', { command: 'open-preferences' })
-          .catch(e => console.error(e))
-      } else if (clickedID === 'export') {
-        this.showExportPopover()
-      } else if (clickedID === 'show-stats') {
-        // The user wants to display the stats
-        this.$togglePopover(
-          PopoverStats,
-          document.getElementById('toolbar-show-stats') as HTMLElement,
-          {},
-          (data: any) => {
-            if (data.showMoreStats === true) {
-              ipcRenderer.invoke('application', {
-                command: 'open-stats-window'
-              })
-                .catch(err => console.error(err))
-            }
-            this.$closePopover()
-          })
-      } else if (clickedID === 'show-tag-cloud') {
-        const allTags = Object.keys(this.$store.state.tagDatabase)
-        const tagMap = allTags.map(tag => {
-          // Tags have the properties "className", "count", and "text"
-          const storeTag = (this.$store.state.tagDatabase as any)[tag]
-
-          return {
-            className: storeTag.className,
-            count: storeTag.count,
-            text: storeTag.text
-          }
-        })
-
-        const data = {
-          tags: tagMap,
-          suggestions: this.$store.state.tagSuggestions
-        }
-
-        const button = document.getElementById('toolbar-show-tag-cloud')
-
-        this.$togglePopover(PopoverTags, button as HTMLElement, data, (data: any) => {
-          if (data.searchForTag !== '') {
-            // The user has clicked a tag and wants to search for it
-            this.startGlobalSearch('#' + data.searchForTag)
-            this.$closePopover()
-          } else if (data.addSuggestionsToFile === true) {
-            (this.$refs.editor as any).addKeywordsToFile(data.suggestions)
-            this.$closePopover()
-          }
-        })
-      } else if (clickedID === 'pomodoro') {
-        const data = {
-          taskDuration: this.pomodoro.durations.task / 60,
-          shortDuration: this.pomodoro.durations.short / 60,
-          longDuration: this.pomodoro.durations.long / 60,
-          currentPhase: this.pomodoro.phase.type,
-          elapsed: this.pomodoro.phase.elapsed,
-          isRunning: this.pomodoro.intervalHandle !== undefined,
-          effect: this.pomodoro.currentEffectFile,
-          // Data type magic ✨
-          soundEffects: Object.fromEntries(new Map(SOUND_EFFECTS.map(effect => [ effect.file, effect.label ]))),
-          volume: this.pomodoro.soundEffect.volume * 100
-        }
-
-        this.pomodoro.popover = this.$togglePopover(
-          PopoverPomodoro,
-          document.getElementById('toolbar-pomodoro') as HTMLElement,
-          data,
-          (data: any) => {
-            // Update the durations as necessary
-            this.pomodoro.durations.task = data.taskDuration
-            this.pomodoro.durations.short = data.shortDuration
-            this.pomodoro.durations.long = data.longDuration
-
-            // Make sure to add a final sanity check for the actual values of the pomodoro since the
-            // user can with some effort completely remove the time value
-            if (typeof this.pomodoro.durations.task !== 'number' || this.pomodoro.durations.task < 1) {
-              this.pomodoro.durations.task = 1
-            }
-            if (typeof this.pomodoro.durations.short !== 'number' || this.pomodoro.durations.short < 1) {
-              this.pomodoro.durations.short = 1
-            }
-            if (typeof this.pomodoro.durations.long !== 'number' || this.pomodoro.durations.long < 1) {
-              this.pomodoro.durations.long = 1
-            }
-
-            const effectChanged = data.effect !== this.pomodoro.currentEffectFile
-            const volumeChanged = data.volume !== this.pomodoro.soundEffect.volume
-            if (effectChanged) {
-              this.pomodoro.currentEffectFile = data.effect
-              this.pomodoro.soundEffect = new Audio(data.effect)
-              this.pomodoro.soundEffect.volume = data.volume
-            }
-
-            if (volumeChanged) {
-              this.pomodoro.soundEffect.volume = data.volume
-            }
-
-            if (effectChanged || volumeChanged) {
-              this.pomodoro.soundEffect.pause()
-              this.pomodoro.soundEffect.currentTime = 0
-              this.pomodoro.soundEffect.play().catch(e => {
-                /* We will be getting errors when pausing quickly */
-              })
-            }
-
-            const shouldStart = this.pomodoro.intervalHandle === undefined && data.isRunning === true
-            const shouldStop = this.pomodoro.intervalHandle !== undefined && data.isRunning === false
-
-            if (shouldStart) {
-              this.pomodoro.soundEffect.pause()
-              this.pomodoro.soundEffect.currentTime = 0
-              this.startPomodoro()
-              this.$closePopover()
-            } else if (shouldStop) {
-              this.pomodoro.soundEffect.pause()
-              this.pomodoro.soundEffect.currentTime = 0
-              this.stopPomodoro()
-              this.$closePopover()
-            }
-          })
-      } else if (clickedID === 'insert-table') {
-        // Display the insertion popover
-        const data = {}
-        const elem = document.getElementById('toolbar-insert-table')
-        this.$togglePopover(PopoverTable, elem as HTMLElement, data, (data: any) => {
-          // Generate a simple table based on the info, and insert it.
-          let table = ''
-          for (let i = 0; i < data.tableSize.rows; i++) {
-            table += '|'
-            for (let k = 0; k < data.tableSize.cols; k++) {
-              table += '   |'
-            }
-            table += '\n'
-          }
-
-          (this.$refs.editor as any).replaceSelection(table)
-          this.$closePopover()
-        })
-      } else if (clickedID === 'document-info') {
-        const data = {
-          docInfo: this.$store.state.activeDocumentInfo
-        }
-        const elem = document.getElementById('toolbar-document-info')
-        this.$togglePopover(PopoverDocInfo, elem as HTMLElement, data, (data: any) => {
-          // Do nothing
-        })
-      } else if (clickedID.startsWith('markdown') === true && clickedID.length > 8) {
-        // The user clicked a command button, so we just have to run that.
-        (this.$refs.editor as any).executeCommand(clickedID)
-      } else if (clickedID === 'insertFootnote') {
-        (this.$refs.editor as any).executeCommand(clickedID)
-      }
+    {
+      type: 'button',
+      id: 'show-tag-cloud',
+      title: trans('Tags'),
+      icon: 'tag',
+      badge: undefined // this.hasTagSuggestions
     },
-    handleToggle: function (controlState: { id: string, state: any }) {
-      const { id, state } = controlState
-      if (id === 'toggle-readability') {
-        this.readabilityActive = state // For simple toggles, the state is just a boolean
-      } else if (id === 'toggle-sidebar') {
-        ;(global as any).config.set('window.sidebarVisible', state)
-      } else if (id === 'toggle-file-manager') {
-        // Since this is a three-way-toggle, we have to inspect the state.
-        this.fileManagerVisible = state !== undefined
-        if (state !== undefined) {
-          // Set the shown component to the correct one
-          this.mainSplitViewVisibleComponent = state
-        }
-      }
+    {
+      type: 'button',
+      id: 'open-preferences',
+      title: trans('Open the settings dialog'),
+      icon: 'cog',
+      visible: getToolbarButtonDisplay('showOpenPreferencesButton')
     },
-    startPomodoro: function () {
-      // Starts a new pomodoro timer
-      this.pomodoro.phase.type = 'task'
-      this.pomodoro.phase.elapsed = 0
-
-      this.pomodoro.intervalHandle = setInterval(() => {
-        this.pomodoroTick()
-      }, 1000)
+    {
+      type: 'button',
+      id: 'new-file',
+      title: trans('New File…'),
+      icon: 'plus',
+      visible: getToolbarButtonDisplay('showNewFileButton')
     },
-    pomodoroTick: function () {
-      // Progresses the pomodoro counter by one second
-      this.pomodoro.phase.elapsed += 1
-
-      const currentPhaseDur = this.pomodoro.durations[this.pomodoro.phase.type]
-      const phaseIsFinished = this.pomodoro.phase.elapsed === currentPhaseDur
-
-      if (phaseIsFinished) {
-        this.pomodoro.phase.elapsed = 0
-        this.pomodoro.counter[this.pomodoro.phase.type] += 1
-
-        if (this.pomodoro.phase.type === 'task' && this.pomodoro.counter.task % 4 === 0) {
-          this.pomodoro.phase.type = 'long'
-        } else if (this.pomodoro.phase.type === 'task') {
-          this.pomodoro.phase.type = 'short'
-        } else {
-          // Both breaks lead to a new task
-          this.pomodoro.phase.type = 'task'
-        }
-
-        this.pomodoro.soundEffect.play().catch(e => { /* We will be getting errors when pausing quickly */ })
-      }
-
-      // Finally handle the popover logic
-      if (this.pomodoro.popover !== undefined && this.pomodoro.popover.isClosed() === false) {
-        // The popover is visible, so let's update the data. Good thing is, we
-        // only really need to update two things: The current task, and the
-        // elapsed time.
-        this.pomodoro.popover.updateData({
-          currentPhase: this.pomodoro.phase.type,
-          elapsed: this.pomodoro.phase.elapsed
-        })
-      } else if (this.pomodoro.popover !== undefined && this.pomodoro.popover.isClosed() === true) {
-        this.pomodoro.popover = undefined // Cleanup
-      }
+    {
+      type: 'button',
+      id: 'previous-file',
+      title: trans('Previous file'),
+      icon: 'arrow',
+      direction: 'left',
+      visible: getToolbarButtonDisplay('showPreviousFileButton')
     },
-    stopPomodoro: function () {
-      // Stops the pomodoro timer
-      this.pomodoro.phase.type = 'task'
-      this.pomodoro.phase.elapsed = 0
-      this.pomodoro.counter.task = 0
-      this.pomodoro.counter.short = 0
-      this.pomodoro.counter.long = 0
-
-      if (this.pomodoro.intervalHandle !== undefined) {
-        clearInterval(this.pomodoro.intervalHandle)
-        this.pomodoro.intervalHandle = undefined
-      }
+    {
+      type: 'button',
+      id: 'next-file',
+      title: trans('Next file'),
+      icon: 'arrow',
+      direction: 'right',
+      visible: getToolbarButtonDisplay('showNextFileButton')
     },
-    showExportPopover: function () {
-      if (this.$store.state.activeFile === null) {
-        return // Can't export a non-open file
-      }
-      const data = {
-        format: this.$store.state.config['export.singleFileLastExporter']
-      }
-      this.$togglePopover(
-        PopoverExport,
-        document.getElementById('toolbar-export') as HTMLElement,
-        data,
-        (data: any) => {
-          if (data.shouldExport === true) {
-            // Remember to de-proxy any non-primitive data types so that they can
-            // be sent over the IPC pipe
-            const options: { [key: string]: string } = {}
-            for (const key in data.formatOptions) {
-              options[key] = data.formatOptions[key]
-            }
-            // Remember the last choice
-            (global as any).config.set('export.singleFileLastExporter', data.format)
-            // If the file is modified, export the current contents of the editor
-            // rather than what is saved on disk
-            let content
-            if (this.$store.state.modifiedDocuments.includes(this.$store.state.activeFile.path) === true) {
-              content = (this.$refs.editor as any).getValue()
-            }
-            // Run the exporter
-            ipcRenderer.invoke('application', {
-              command: 'export',
-              payload: {
-                format: data.format,
-                options: options,
-                exportTo: data.exportTo,
-                file: this.$store.state.activeFile.path,
-                content: content
-              }
-            })
-              .catch(e => console.error(e))
-            this.$closePopover()
-          }
-        })
+    {
+      type: 'spacer',
+      size: '3x'
+    },
+    {
+      type: 'button',
+      class: 'share',
+      id: 'export',
+      title: trans('Export the current file'),
+      icon: 'export'
+    },
+    {
+      type: 'button',
+      id: 'toggle-readability',
+      title: trans('Toggle readability mode'),
+      icon: 'eye',
+      visible: getToolbarButtonDisplay('showToggleReadabilityButton')
+    },
+    {
+      type: 'spacer',
+      id: 'spacer-two',
+      size: '1x'
+    },
+    {
+      type: 'button',
+      id: 'markdownComment',
+      title: trans('Comment'),
+      icon: 'code',
+      visible: getToolbarButtonDisplay('showMarkdownCommentButton')
+    },
+    {
+      type: 'button',
+      id: 'markdownLink',
+      title: trans('Link'),
+      icon: 'link',
+      visible: getToolbarButtonDisplay('showMarkdownLinkButton')
+    },
+    {
+      type: 'button',
+      id: 'markdownImage',
+      title: trans('Image'),
+      icon: 'image',
+      visible: getToolbarButtonDisplay('showMarkdownImageButton')
+    },
+    {
+      type: 'button',
+      id: 'markdownMakeTaskList',
+      title: trans('Tasklist'),
+      icon: 'checkbox-list',
+      visible: getToolbarButtonDisplay('showMarkdownMakeTaskListButton')
+    },
+    {
+      type: 'button',
+      id: 'insert-table',
+      title: trans('Insert Table'),
+      icon: 'table',
+      visible: getToolbarButtonDisplay('showInsertTableButton')
+    },
+    {
+      type: 'button',
+      id: 'insertFootnote',
+      title: trans('Footnote'),
+      icon: 'footnote',
+      visible: getToolbarButtonDisplay('showInsertFootnoteButton')
+    },
+    {
+      type: 'spacer',
+      size: '3x'
+    },
+    {
+      type: 'text',
+      align: 'center',
+      id: 'document-info',
+      content: parsedDocumentInfo.value,
+      visible: getToolbarButtonDisplay('showDocumentInfoText')
+    },
+    {
+      type: 'ring',
+      id: 'pomodoro',
+      title: trans('Pomodoro-Timer'),
+      // Good morning, we are verbose here
+      progressPercent: pomodoro.value.phase.elapsed / pomodoro.value.durations[pomodoro.value.phase.type] * 100,
+      colour: pomodoro.value.colour[pomodoro.value.phase.type],
+      visible: getToolbarButtonDisplay('showPomodoroButton')
+    },
+    {
+      type: 'toggle',
+      id: 'toggle-sidebar',
+      title: trans('Toggle Sidebar'),
+      icon: 'view-columns',
+      initialState: sidebarVisible.value
+    },
+    {
+      type: 'button',
+      id: 'open-updater',
+      title: trans('Update available'),
+      icon: 'download',
+      visible: isUpdateAvailable.value
     }
+  ]
+})
+
+const editorSidebarSplitComponent = ref<typeof SplitView|null>(null)
+const fileManagerSplitComponent = ref<typeof SplitView|null>(null)
+const globalSearchComponent = ref<typeof GlobalSearch|null>(null)
+const paneConfiguration = computed(() => documentTreeStore.paneStructure)
+const lastLeafId = computed(() => documentTreeStore.lastLeafId)
+const distractionFree = computed<boolean>(() => windowStateStore.distractionFreeMode !== undefined)
+
+watch(sidebarVisible, (newValue) => {
+  if (newValue) {
+    if (distractionFree.value) {
+      if (windowStateStore.distractionFreeMode !== undefined) {
+        windowStateStore.distractionFreeMode = undefined
+      }
+    }
+
+    editorSidebarSplitComponent.value?.unhide()
+  } else {
+    editorSidebarSplitComponent.value?.hideView(2)
   }
 })
+
+watch(fileManagerVisible, (newValue) => {
+  if (newValue) {
+    if (distractionFree.value) {
+      if (windowStateStore.distractionFreeMode !== undefined) {
+        windowStateStore.distractionFreeMode = undefined
+      }
+    }
+
+    fileManagerSplitComponent.value?.unhide()
+  } else {
+    fileManagerSplitComponent.value?.hideView(1)
+  }
+})
+
+watch(mainSplitViewVisibleComponent, (newValue) => {
+  if (newValue === 'globalSearch') {
+    // The global search just became visible, so focus the query input
+    nextTick().then(() => {
+      globalSearchComponent.value?.focusQueryInput()
+    }).catch(e => console.error(e))
+  }
+})
+
+watch(distractionFree, (newValue) => {
+  if (newValue) {
+    // Enter distraction free mode
+    sidebarsBeforeDistractionfree.value = {
+      fileManager: fileManagerVisible.value,
+      sidebar: sidebarVisible.value
+    }
+    configStore.setConfigValue('window.sidebarVisible', false)
+    fileManagerVisible.value = false
+  } else {
+    // Leave distraction free mode
+    configStore.setConfigValue('window.sidebarVisible', sidebarsBeforeDistractionfree.value.sidebar)
+    fileManagerVisible.value = sidebarsBeforeDistractionfree.value.fileManager
+  }
+})
+
+onMounted(() => {
+  exportButton.value = document.querySelector('#toolbar-export')
+  statsButton.value = document.querySelector('#toolbar-show-stats')
+  tagsButton.value = document.querySelector('#toolbar-show-tag-cloud')
+  tableButton.value = document.querySelector('#toolbar-insert-table')
+  docInfoButton.value = document.querySelector('#toolbar-document-info')
+  pomodoroButton.value = document.querySelector('#toolbar-pomodoro')
+
+  ipcRenderer.on('shortcut', (event, shortcut) => {
+    if (shortcut === 'toggle-sidebar') {
+      configStore.setConfigValue('window.sidebarVisible', !sidebarVisible.value)
+    } else if (shortcut === 'insert-id') {
+      editorCommands.value.data = generateId(configStore.config.zkn.idGen)
+      editorCommands.value.replaceSelection = !editorCommands.value.replaceSelection
+    } else if (shortcut === 'copy-current-id' && documentTreeStore.lastLeafActiveFile !== undefined) {
+      ipcRenderer.invoke('application', {
+        command: 'get-descriptor',
+        payload: documentTreeStore.lastLeafActiveFile.path
+      })
+        .then((descriptor: AnyDescriptor|undefined) => {
+          if (descriptor?.type === 'file' && descriptor?.id !== '') {
+            navigator.clipboard.writeText(descriptor.id).catch(err => console.error(err))
+          }
+        })
+        .catch(err => console.error(err))
+    } else if (shortcut === 'global-search') {
+      fileManagerVisible.value = true
+      mainSplitViewVisibleComponent.value = 'globalSearch'
+      // Focus input
+      nextTick()
+        .then(() => { globalSearchComponent.value?.focusQueryInput() })
+        .catch(err => console.error(err))
+    } else if (shortcut === 'toggle-file-manager') {
+      if (fileManagerVisible.value && mainSplitViewVisibleComponent.value === 'fileManager') {
+        fileManagerVisible.value = false
+      } else if (!fileManagerVisible.value) {
+        fileManagerVisible.value = true
+        mainSplitViewVisibleComponent.value = 'fileManager'
+      } else if (mainSplitViewVisibleComponent.value === 'globalSearch') {
+        mainSplitViewVisibleComponent.value = 'fileManager'
+      }
+    } else if (shortcut === 'filter-files') {
+      // We need to immediately make the file manager visible, which will
+      // -- in the next tick -- focus its filter input.
+      fileManagerVisible.value = true
+      mainSplitViewVisibleComponent.value = 'fileManager'
+    } else if (shortcut === 'export') {
+      showExportPopover.value = true
+    } else if (shortcut === 'print') {
+      if (activeFile.value !== undefined) {
+        ipcRenderer.invoke('application', { command: 'print', payload: activeFile.value.path })
+          .catch(err => console.error(err))
+      }
+    } else if (shortcut === 'navigate-back') {
+      ipcRenderer.invoke('documents-provider', {
+        command: 'navigate-back',
+        payload: {
+          windowId,
+          leafId: lastLeafId.value
+        }
+      } as DocumentManagerIPCAPI).catch(err => console.error(err))
+    } else if (shortcut === 'navigate-forward') {
+      ipcRenderer.invoke('documents-provider', {
+        command: 'navigate-forward',
+        payload: {
+          windowId,
+          leafId: lastLeafId.value
+        }
+      } as DocumentManagerIPCAPI).catch(err => console.error(err))
+    }
+  })
+
+  // Initially, we need to hide the sidebar, since the view will be visible
+  // by default.
+  if (!sidebarVisible.value) {
+    editorSidebarSplitComponent.value?.hideView(2)
+  }
+
+  // Check if there is an update available.
+  ipcRenderer.invoke('update-provider', { command: 'update-status' })
+    .then((state: UpdateState) => {
+      isUpdateAvailable.value = state.updateAvailable
+    })
+    .catch(err => console.error(err))
+
+  // Also, listen for any changes in the update available state
+  ipcRenderer.on('update-provider', (event, command: string, updateState: UpdateState) => {
+    if (command === 'state-changed') {
+      isUpdateAvailable.value = updateState.updateAvailable
+    }
+  })
+})
+
+function fileManagerSplitComponentResized (sizes: [number, number]): void {
+  configStore.setConfigValue('ui.fileManagerSplitSize', sizes)
+}
+
+function editorSidebarSplitComponentResized (sizes: [number, number]): void {
+  configStore.setConfigValue('ui.editorSidebarSplitSize', sizes)
+}
+
+function insertTable (spec: { rows: number, cols: number }): void {
+  // Generate a simple table based on the info, and insert it.
+  const ast: string[][] = []
+  const align: Array<'center'|'left'|'right'> = []
+  for (let i = 0; i < spec.rows; i++) {
+    const row: string[] = []
+    align.push('left')
+    for (let k = 0; k < spec.cols; k++) {
+      row.push('')
+    }
+    ast.push(row)
+  }
+
+  editorCommands.value.data = buildPipeTable(ast, align)
+  editorCommands.value.replaceSelection = !editorCommands.value.replaceSelection
+}
+
+function genericJtl (lineNumber: number): void {
+  // This function is called from the sidebar where we already know the file
+  // is open (because its editor component has provided the table of
+  // contents in the first place).
+  const doc = documentTreeStore.lastLeafActiveFile
+  if (doc !== undefined) {
+    editorCommands.value.data = { filePath: doc.path, lineNumber }
+    editorCommands.value.jumpToLine = !editorCommands.value.jumpToLine
+  }
+}
+
+function jtl (filePath: string, lineNumber: number, newTab: boolean): void {
+  // We need to make sure the given file is (a) open somewhere and (b) the
+  // active file.
+
+  // Simplest case: The file is already active somewhere
+  const activeFileLeaf = documentTreeStore.paneData
+    .find((pane: LeafNodeJSON) => pane.activeFile?.path === filePath)
+  if (activeFileLeaf !== undefined) {
+    // There is at least one leaf with the given file being active, so we
+    // can simply emit the event
+    editorCommands.value.data = { filePath, lineNumber }
+    editorCommands.value.jumpToLine = !editorCommands.value.jumpToLine
+    return
+  }
+
+  const WAIT_TIME = 100 // How long to wait before re-executing the jtl()
+
+  // Next, let's see if the file is at least open somewhere
+  const containingLeaf = documentTreeStore.paneData
+    .find((pane: LeafNodeJSON) => {
+      return pane.openFiles.find(doc => doc.path === filePath) !== undefined
+    })
+  if (containingLeaf !== undefined) {
+    // Let's first make it the active file and then execute the command
+    ipcRenderer.invoke('documents-provider', {
+      command: 'open-file',
+      payload: { path: filePath, windowId, leafId: containingLeaf.id }
+    } as DocumentManagerIPCAPI)
+      .then(() => {
+        // Re-execute the jtl command
+        setTimeout(() => jtl(filePath, lineNumber, newTab), WAIT_TIME)
+      })
+      .catch(e => console.error(e))
+    return
+  }
+
+  // If we're here, the file was not open, so we have to do that first. At
+  // least this both makes it an open file AND an active file somewhere in
+  // the window.
+  ipcRenderer.invoke('documents-provider', {
+    command: 'open-file',
+    payload: {
+      path: filePath,
+      windowId,
+      leafId: lastLeafId.value,
+      newTab
+    }
+  } as DocumentManagerIPCAPI)
+    .then(() => {
+      // Re-execute the jtl command
+      setTimeout(() => jtl(filePath, lineNumber, newTab), WAIT_TIME)
+    })
+    .catch(e => console.error(e))
+}
+
+function moveSection (data: { from: number, to: number }): void {
+  editorCommands.value.data = { from: data.from, to: data.to }
+  editorCommands.value.moveSection = !editorCommands.value.moveSection
+}
+
+function startGlobalSearch (terms: string): void {
+  mainSplitViewVisibleComponent.value = 'globalSearch'
+  fileManagerVisible.value = true
+  nextTick()
+    .then(() => {
+      globalSearchComponent.value?.startSearch(terms)
+    })
+    .catch(err => console.error(err))
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function toggleFileList (): void {
+  // This event can be used by various components to ask the file manager to
+  // toggle its file list visibility
+  fileManagerSplitComponent.value?.toggleFileList()
+}
+
+function handleClick (clickedID?: string): void {
+  if (clickedID === 'toggle-readability') {
+    editorCommands.value.readabilityMode = !editorCommands.value.readabilityMode
+  } else if (clickedID === 'root-open-workspaces') {
+    ipcRenderer.invoke('application', { command: 'root-open-workspaces' })
+      .catch(e => console.error(e))
+  } else if (clickedID === 'open-preferences') {
+    ipcRenderer.invoke('application', { command: 'open-preferences' })
+      .catch(e => console.error(e))
+  } else if (clickedID === 'new-file') {
+    ipcRenderer.invoke('application', { command: 'file-new', payload: { type: 'md' } })
+      .catch(e => console.error(e))
+  } else if (clickedID === 'previous-file') {
+    ipcRenderer.invoke('documents-provider', {
+      command: 'navigate-back',
+      payload: {
+        windowId,
+        leafId: lastLeafId.value
+      }
+    } as DocumentManagerIPCAPI).catch(err => console.error(err))
+  } else if (clickedID === 'next-file') {
+    ipcRenderer.invoke('documents-provider', {
+      command: 'navigate-forward',
+      payload: {
+        windowId,
+        leafId: lastLeafId.value
+      }
+    } as DocumentManagerIPCAPI).catch(err => console.error(err))
+  } else if (clickedID === 'export') {
+    showExportPopover.value = !showExportPopover.value
+  } else if (clickedID === 'show-stats') {
+    // The user wants to display the stats
+    showStatsPopover.value = !showStatsPopover.value
+  } else if (clickedID === 'show-tag-cloud') {
+    showTagsPopover.value = !showTagsPopover.value
+    // TODO startGlobalSearch('#' + data.searchForTag)
+    // editorCommands.value.data = data.suggestions
+    // editorCommands.value.addKeywords = !editorCommands.value.addKeywords
+  } else if (clickedID === 'pomodoro') {
+    showPomodoroPopover.value = !showPomodoroPopover.value
+  } else if (clickedID === 'insert-table') {
+    // Display the insertion popover
+    showTablePopover.value = !showTablePopover.value
+  } else if (clickedID === 'document-info') {
+    showDocInfoPopover.value = !showDocInfoPopover.value
+  } else if (clickedID !== undefined && clickedID.startsWith('markdown') && clickedID.length > 8) {
+    // The user clicked a command button, so we just have to run that.
+    editorCommands.value.data = clickedID
+    editorCommands.value.executeCommand = !editorCommands.value.executeCommand
+  } else if (clickedID === 'insertFootnote') {
+    editorCommands.value.data = clickedID
+    editorCommands.value.executeCommand = !editorCommands.value.executeCommand
+  } else if (clickedID === 'open-updater') {
+    ipcRenderer.invoke('application', {
+      command: 'open-update-window'
+    })
+      .catch(err => console.error(err))
+  }
+}
+
+function setPomodoroConfig (config: PomodoroConfig): void {
+  // Update the durations as necessary
+  pomodoro.value.durations.task = config.durations.task
+  pomodoro.value.durations.short = config.durations.short
+  pomodoro.value.durations.long = config.durations.long
+
+  const effectChanged = config.currentEffectFile !== pomodoro.value.currentEffectFile
+  const volumeChanged = config.soundEffect.volume !== pomodoro.value.soundEffect.volume
+  if (effectChanged) {
+    pomodoro.value.currentEffectFile = config.currentEffectFile
+    pomodoro.value.soundEffect = new Audio(config.currentEffectFile)
+    pomodoro.value.soundEffect.volume = config.soundEffect.volume
+  }
+  if (!effectChanged && volumeChanged) {
+    pomodoro.value.soundEffect.volume = config.soundEffect.volume
+  }
+
+  if (effectChanged || volumeChanged) {
+    pomodoro.value.soundEffect.pause()
+    pomodoro.value.soundEffect.currentTime = 0
+    pomodoro.value.soundEffect.play().catch(_e => {
+      /* We will be getting errors when pausing quickly */
+    })
+  }
+}
+
+function handleToggle (controlState: { id?: string, state?: string | boolean }): void {
+  const { id, state } = controlState
+  if (id === 'toggle-sidebar') {
+    configStore.setConfigValue('window.sidebarVisible', state)
+  } else if (id === 'toggle-file-manager') {
+    // Since this is a three-way-toggle, we have to inspect the state.
+    fileManagerVisible.value = state !== undefined
+    if (typeof state === 'string' && (state === 'fileManager' || state === 'globalSearch')) {
+      // Set the shown component to the correct one
+      mainSplitViewVisibleComponent.value = state
+    } else {
+      console.warn(`Could not toggle main split component; expected state to be 'fileManager' or 'globalSearch', received ${state}`)
+    }
+  }
+}
+
+function startPomodoro (): void {
+  pomodoro.value.soundEffect.pause()
+  pomodoro.value.soundEffect.currentTime = 0
+  // Starts a new pomodoro timer
+  pomodoro.value.phase.type = 'task'
+  pomodoro.value.phase.elapsed = 0
+
+  pomodoro.value.intervalHandle = setInterval(() => {
+    pomodoroTick()
+  }, 1000)
+}
+
+function pomodoroTick (): void {
+  // Progresses the pomodoro counter by one second
+  pomodoro.value.phase.elapsed += 1
+
+  const currentPhaseDur = pomodoro.value.durations[pomodoro.value.phase.type]
+  const phaseIsFinished = pomodoro.value.phase.elapsed === currentPhaseDur
+
+  if (phaseIsFinished) {
+    pomodoro.value.phase.elapsed = 0
+    pomodoro.value.counter[pomodoro.value.phase.type] += 1
+
+    if (pomodoro.value.phase.type === 'task' && pomodoro.value.counter.task % 4 === 0) {
+      pomodoro.value.phase.type = 'long'
+    } else if (pomodoro.value.phase.type === 'task') {
+      pomodoro.value.phase.type = 'short'
+    } else {
+      // Both breaks lead to a new task
+      pomodoro.value.phase.type = 'task'
+    }
+
+    pomodoro.value.soundEffect.play().catch(_e => { /* We will be getting errors when pausing quickly */ })
+  }
+
+  // Finally handle the popover logic
+  if (pomodoro.value.popover !== undefined && pomodoro.value.popover.isClosed() === false) {
+    // The popover is visible, so let's update the data. Good thing is, we
+    // only really need to update two things: The current task, and the
+    // elapsed time.
+    pomodoro.value.popover.updateData({
+      internalCurrentPhase: pomodoro.value.phase.type,
+      internalElapsed: pomodoro.value.phase.elapsed
+    })
+  } else if (pomodoro.value.popover !== undefined && pomodoro.value.popover.isClosed() === true) {
+    pomodoro.value.popover = undefined // Cleanup
+  }
+}
+
+function stopPomodoro (): void {
+  pomodoro.value.soundEffect.pause()
+  pomodoro.value.soundEffect.currentTime = 0
+  // Stops the pomodoro timer
+  pomodoro.value.phase.type = 'task'
+  pomodoro.value.phase.elapsed = 0
+  pomodoro.value.counter.task = 0
+  pomodoro.value.counter.short = 0
+  pomodoro.value.counter.long = 0
+
+  if (pomodoro.value.intervalHandle !== undefined) {
+    clearInterval(pomodoro.value.intervalHandle)
+    pomodoro.value.intervalHandle = undefined
+  }
+}
+
+function getToolbarButtonDisplay (configName: keyof ConfigOptions['displayToolbarButtons']): boolean {
+  return configStore.config.displayToolbarButtons[configName]
+}
 </script>
 
 <style lang="less">

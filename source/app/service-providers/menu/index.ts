@@ -16,7 +16,7 @@ import {
   Menu,
   ipcMain,
   BrowserWindow,
-  MenuItemConstructorOptions,
+  type MenuItemConstructorOptions,
   app
 } from 'electron'
 
@@ -26,10 +26,12 @@ import broadcastIPCMessage from '@common/util/broadcast-ipc-message'
 import win32Menu from './menu.win32'
 import macOSMenu from './menu.darwin'
 import ProviderContract from '../provider-contract'
-import RecentDocumentsProvider from '../recent-docs'
-import WindowProvider from '../windows'
-import CommandProvider from '../commands'
-import LogProvider from '../log'
+import type RecentDocumentsProvider from '../recent-docs'
+import type CommandProvider from '../commands'
+import type LogProvider from '../log'
+import type ConfigProvider from '@providers/config'
+import type DocumentManager from '@providers/documents'
+import type WindowProvider from '@providers/windows'
 
 // Types from the global.d.ts of the window-register module
 interface CheckboxRadioItem {
@@ -105,7 +107,8 @@ export default class MenuProvider extends ProviderContract {
     private readonly _config: ConfigProvider,
     private readonly _recentDocs: RecentDocumentsProvider,
     private readonly _commands: CommandProvider,
-    private readonly _windows: WindowProvider
+    private readonly _windows: WindowProvider,
+    private readonly _documents: DocumentManager
   ) {
     super()
     this._checkboxState = new Map()
@@ -221,7 +224,6 @@ export default class MenuProvider extends ProviderContract {
               this._logger.error(`[Menu Provider] Could not click menu item with role ${menuItem.role}, since no handler is implemented!`)
           }
         } else {
-          console.log(`Clicking menu item with ID ${itemID}`)
           menuItem.click(menuItem, focusedWindow)
         }
       }
@@ -254,7 +256,7 @@ export default class MenuProvider extends ProviderContract {
    * @return  {Promise<string|undefined>}        Returns the clicked ID, or undefined
    */
   private async _displayNativeContextMenu (menu: MenuItemConstructorOptions[], x: number, y: number): Promise<string|undefined> {
-    return await new Promise((resolve, reject) => {
+    return await new Promise((resolve, _reject) => {
       let resolvedID: string|undefined
       // Define a quick'n'dirty recursive function that applies the click handler
       // to (theoretically) indefinite submenus
@@ -291,7 +293,23 @@ export default class MenuProvider extends ProviderContract {
           resolve(resolvedID)
         }, 100)
       })
-      popupMenu.popup({ x: x, y: y })
+
+      // NOTE: The coordinates we receive from the renderer are scaled by the
+      // zoom scale factor, but the context menu will show up at absolute
+      // coordinates, meaning that the x/y values will diverge more and more the
+      // further the user moves down/right. By normalizing the coordinates with
+      // the scale factor, we avoid that the context menu is offset from the
+      // mouse pointer.
+      const focusedWindow = BrowserWindow.getFocusedWindow()
+      if (focusedWindow !== null && focusedWindow.webContents.getZoomLevel() !== 0) {
+        const factor = focusedWindow.webContents.getZoomFactor()
+        x *= factor
+        y *= factor
+      }
+
+      // Enforce integers for the coordinates, otherwise we will get this weird
+      // "conversion failure" error.
+      popupMenu.popup({ x: Math.round(x), y: Math.round(y) })
     })
   }
 
@@ -351,7 +369,7 @@ export default class MenuProvider extends ProviderContract {
       this._checkboxState.set(id, val)
     }
 
-    const blueprint = BLUEPRINTS[process.platform](this._logger, this._config, this._recentDocs, this._commands, this._windows, getState, setState)
+    const blueprint = BLUEPRINTS[process.platform](this._logger, this._config, this._recentDocs, this._commands, this._windows, this._documents, getState, setState)
     // Last but not least build the template
     return Menu.buildFromTemplate(blueprint)
   }

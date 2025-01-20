@@ -15,10 +15,10 @@
 import path from 'path'
 import ZettlrCommand from './zettlr-command'
 import sanitize from 'sanitize-filename'
-import { codeFileExtensions, mdFileExtensions } from '@providers/fsal/util/valid-file-extensions'
-
-const ALLOWED_FILETYPES = mdFileExtensions(true)
-const CODE_FILETYPES = codeFileExtensions(true)
+import { dialog } from 'electron'
+import { trans } from '@common/i18n-main'
+import replaceLinks from '@common/util/replace-links'
+import { hasMdOrCodeExt } from '@common/util/file-extention-checks'
 
 export default class FileRename extends ZettlrCommand {
   constructor (app: any) {
@@ -36,20 +36,22 @@ export default class FileRename extends ZettlrCommand {
     // already exists
     let newName = sanitize(arg.name, { replacement: '-' })
 
-    // If no valid filename is provided, assume .md
-    let ext = path.extname(newName).toLowerCase()
-    if (!ALLOWED_FILETYPES.includes(ext) && !CODE_FILETYPES.includes(ext)) {
+    if (newName === '') {
+      this._app.windows.prompt('Cannot rename file: No valid characters')
+      return
+    }
+
+    // If no valid filename extension is provided, assume .md
+    if (!hasMdOrCodeExt(newName)) {
       newName += '.md'
     }
 
-    const file = this._app.fsal.findFile(arg.path)
-    if (file === null) {
+    const file = this._app.workspaces.findFile(arg.path)
+    if (file === undefined) {
       return this._app.log.error(`Could not find file ${String(arg.path)}`)
     }
 
-    // Find the file within the open documents
-    const documentDescriptor = this._app.documents.openFiles.find(e => e.path === file.path)
-    if (documentDescriptor?.modified === true) {
+    if (this._app.documents.isModified(file.path)) {
       // Make sure to not rename a file if it contains unsaved changes. People who
       // have autosave activated are pretty likely to never see this message box
       // either way.
@@ -58,48 +60,82 @@ export default class FileRename extends ZettlrCommand {
     }
 
     // If the new name equals the old one, don't do anything, see #1942
-    if (file.name.toLowerCase() === newName.toLowerCase()) {
+    if (file.name === newName) {
       this._app.log.info(`[App] Didn't rename file to ${newName} since it's the same name`)
       return
     }
 
-    // Test if we are about to override a file
-    const dir = file.parent
-    let found = dir?.children.find(e => e.name.toLowerCase() === newName.toLowerCase())
-    if (found !== undefined && found.type !== 'directory' && file !== found) {
+    const newPath = path.join(file.dir, newName)
+    const pathsEqualCaseInsensitive = file.path.toLowerCase() === newPath.toLowerCase()
+
+    // Test if we are about to override a file. In the case that the user only
+    // wants to change the capitalization of a file (e.g., testfile -> Testfile)
+    // then case-insensitive file systems (including Windows & macOS) will
+    // report that testfile === Testfile, which means that `pathExists` will
+    // return true. That's where the second check comes in: If the OS reports
+    // that the new path already exists, BUT if we compare it case-insensitive
+    // it's the same, then we know that newPath is essentially oldPath, and we
+    // should not ask the user for overwriting, as this is literally the file
+    // we want to rename. See #5460
+    if (await this._app.fsal.pathExists(newPath) && !pathsEqualCaseInsensitive) {
       // Ask for override
       if (!await this._app.windows.shouldOverwriteFile(newName)) {
         return // No override wanted
       } else {
         // Remove the file to be overwritten prior
-        await this._app.fsal.removeFile(found)
-      }
-    }
-
-    // Check if the file was currently open. Since only the FSAL will get the
-    // info, we should close immediately, in order to prevent a "zombie" file
-    // to remain open in the document manager.
-    const wasActive = this._app.documents.activeFile?.path === file.path
-    const wasOpen = documentDescriptor !== undefined
-    if (documentDescriptor !== undefined) {
-      const result = await this._app.commands.run('file-close', documentDescriptor.path)
-      if (result === false) {
-        this._app.log.warning(`[FileRename] Not renaming ${documentDescriptor.path}.`)
-        return
+        await this._app.fsal.removeFile(newPath)
       }
     }
 
     try {
-      await this._app.fsal.renameFile(file, newName)
-      // NOTE: At this point, `file` will contain the _new_ information which
-      // we can now use to re-set the documentManager's state if need be.
-      if (wasOpen) {
-        // NOTE: We must open in a new tab regardless of setting, since in this
-        // case we have programmatically closed the file
-        await this._app.documents.openFile(file.path, true)
+      // We need to retrieve the inboundLinks before we rename the file, since
+      // afterwards the links won't be valid anymore.
+      const oldName = file.name
+      const inboundLinks = this._app.links.retrieveInbound(file.path)
+
+      // Before renaming the file, let's see if it is a root file. Because if it
+      // is, we have to close it first.
+      const { openPaths } = this._app.config.getConfig()
+      const isRoot = openPaths.includes(file.path)
+
+      if (isRoot) {
+        this._app.config.removePath(file.path)
       }
-      if (wasActive) {
-        this._app.documents.activeFile = file
+
+      // Now, rename the file.
+      await this._app.fsal.rename(file.path, newPath)
+      // Notify the documents provider so it can exchange any files if necessary
+      await this._app.documents.hasMovedFile(file.path, newPath)
+
+      if (isRoot) {
+        this._app.config.addPath(newPath)
+      }
+
+      // Finally, let's check if we can update some internal links to that file.
+      if (inboundLinks.length > 0) {
+        const response = await dialog.showMessageBox({
+          title: trans('Confirm'),
+          message: trans('Update %s internal links to file %s?', inboundLinks.length, newName),
+          buttons: [
+            trans('Yes'),
+            trans('No')
+          ],
+          defaultId: 1
+        })
+
+        if (response.response === 1) {
+          return // Do not update the links.
+        }
+
+        // So ... update. We'll basically take the rename-tag command as a template.
+        for (const file of inboundLinks) {
+          const content = await this._app.fsal.readTextFile(file)
+          const newContent = replaceLinks(content, oldName, newName)
+          if (newContent !== content) {
+            await this._app.fsal.writeTextFile(file, newContent)
+            this._app.log.info(`[Application] Replaced link to ${oldName} with ${newName} in file ${file}`)
+          }
+        }
       }
     } catch (e: any) {
       this._app.log.error(`Error during renaming file: ${e.message as string}`, e)

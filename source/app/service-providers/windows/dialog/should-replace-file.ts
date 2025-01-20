@@ -12,8 +12,9 @@
  * END HEADER
  */
 
-import { BrowserWindow, dialog, MessageBoxOptions } from 'electron'
+import { dialog, type BrowserWindow, type MessageBoxOptions } from 'electron'
 import { trans } from '@common/i18n-main'
+import type ConfigProvider from '@providers/config'
 
 /**
  * Asks the user for confirmation, if the file identified by filename should
@@ -27,21 +28,23 @@ import { trans } from '@common/i18n-main'
 export default async function shouldReplaceFileDialog (config: ConfigProvider, win: BrowserWindow, filename: string): Promise<boolean> {
   let options: MessageBoxOptions = {
     type: 'question',
-    title: trans('system.replace_file_title'),
-    message: trans('system.replace_file_message', filename),
-    checkboxLabel: trans('dialog.preferences.always_reload_files'),
+    title: trans('Replace file'),
+    message: trans('File %s has been modified remotely. Replace the loaded version with the newer one from disk?', filename),
+    checkboxLabel: trans('Always load remote changes to the current file'),
     checkboxChecked: config.get('alwaysReloadFiles'),
     buttons: [
-      trans('system.cancel'),
-      trans('system.ok')
+      trans('Cancel'),
+      trans('Ok')
     ],
     cancelId: 0,
     defaultId: 1
   }
 
   // Asynchronous message box to not block the main process
-  // DEBUG: Trying to resolve bug #1645, which seems to relate to modal status vs. promise awaits.
-  const response = ([ 'darwin', 'win32' ].includes(process.platform)) ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options)
+  // DEBUG: Trying to resolve bug #1645, which seems to relate to modal status
+  // vs. promise awaits. UPDATE 2024-03-11: In response to #4952, removing the
+  // platform check again.
+  const response = await dialog.showMessageBox(win, options)
 
   config.set('alwaysReloadFiles', response.checkboxChecked)
 

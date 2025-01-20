@@ -15,7 +15,7 @@
 * END HEADER
 */
 
-import { ParsedTable, ColAlignment } from './types'
+import type { ParsedTable, ColAlignment } from './types'
 
 /**
  * Parses a pipe table
@@ -116,8 +116,5 @@ export default function parsePipeTable (markdownTable: string|string[]): ParsedT
   }
 
   // Return the AST
-  return {
-    'ast': ast,
-    'colAlignments': colAlignments
-  }
+  return { ast, colAlignments }
 }

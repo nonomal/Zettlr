@@ -14,15 +14,13 @@
 
 import path from 'path'
 import { bibtex } from 'astrocite'
-import { BracedComment } from 'astrocite-bibtex'
+import { type BracedComment } from 'astrocite-bibtex'
 import pdfSorter from '@common/util/sort-by-pdf'
-import LogProvider from '@providers/log'
+import type LogProvider from '@providers/log'
 
 const AstrociteAST = bibtex.AST
 
-interface BibTexAttachments {
-  [citekey: string]: string[]|false
-}
+type BibTexAttachments = Record<string, string[]|false>
 
 /**
  * Returns a dictionary in the form citeKey: Array(files)

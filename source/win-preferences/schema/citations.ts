@@ -13,43 +13,48 @@
  */
 
 import { trans } from '@common/i18n-renderer'
+import { type PreferencesFieldset } from '../App.vue'
+import { PreferencesGroups } from './_preferences-groups'
 
-export default function (): any {
-  return {
-    fieldsets: [
-      [
+export function getCitationFields (): PreferencesFieldset[] {
+  return [
+    {
+      title: trans('Citations'),
+      group: PreferencesGroups.Citations,
+      help: undefined, // TODO
+      fields: [
         {
           type: 'radio',
-          label: trans('dialog.preferences.cite_style_label'),
+          label: trans('How would you like autocomplete to insert your citations?'),
           model: 'editor.citeStyle',
           options: {
-            'regular': '[@Author2015, p. 123] → (Author 2015, 123)',
+            regular: '[@Author2015, p. 123] → (Author 2015, 123)',
             'in-text': '@Author2015 → Author (2015)',
             'in-text-suffix': '@Author2015 [p. 123] → Author (2015, 123)'
           }
-        }
-      ],
-      [
+        },
+        { type: 'separator' },
         {
           type: 'file',
-          label: trans('dialog.preferences.citation_database'),
+          label: trans('Citation Database (CSL JSON or BibTex)'),
           model: 'export.cslLibrary',
+          placeholder: trans('Path to file'),
           reset: '',
-          filter: {
-            'json, yaml, yml': 'CSL JSON',
-            'bib': 'BibTeX'
-          }
+          filter: [
+            { extensions: [ 'json', 'yaml', 'yml', 'bib' ], name: 'CSL JSON or BibTeX' },
+            { extensions: [ 'json', 'yaml', 'yml' ], name: 'CSL JSON' },
+            { extensions: ['bib'], name: 'BibTeX' }
+          ]
         },
         {
           type: 'file',
-          label: trans('dialog.preferences.project.csl_style'),
+          label: trans('CSL-Style (optional)'),
           model: 'export.cslStyle',
+          placeholder: trans('Path to file'),
           reset: '',
-          filter: {
-            'csl': 'CSL Style'
-          }
+          filter: [{ extensions: ['csl'], name: 'CSL Style' }]
         }
       ]
-    ]
-  }
+    }
+  ]
 }

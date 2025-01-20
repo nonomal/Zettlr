@@ -19,11 +19,13 @@ import environmentCheck from './util/environment-check'
 import addToPath from './util/add-to-PATH'
 import resolveTimespanMs from './util/resolve-timespan-ms'
 import path from 'path'
+import { getProgramVersion } from './util/get-program-version'
 
 // Developer tools
-import installExtension, { VUEJS3_DEVTOOLS } from 'electron-devtools-installer'
+import installExtension, { VUEJS_DEVTOOLS } from 'electron-devtools-assembler'
 import AppServiceContainer from './app-service-container'
 import { app } from 'electron'
+import { attachAppNavigationHandlers } from './util/attach-app-navigation-handlers'
 
 // We need module-global variables so that garbage collect won't shut down the
 // providers before the app is shut down.
@@ -37,7 +39,7 @@ let upTimestamp: number
  *
  * @return  {void}    Nothing to return
  */
-export async function bootApplication (): Promise<void> {
+export async function bootApplication (): Promise<AppServiceContainer> {
   upTimestamp = Date.now()
 
   // First of all we MUST perform the environment check, since everything else
@@ -57,15 +59,19 @@ export async function bootApplication (): Promise<void> {
   if (!app.isPackaged) {
     try {
       // Load Vue developer extension
-      installExtension(VUEJS3_DEVTOOLS)
-        .then((name: string) => log.info(`Added DevTools extension:  ${name}`))
-        .catch((err: any) => log.error(`Could not install DevTools extensions: ${String(err.message)}`, err))
-    } catch (err) {
-      log.verbose('Electron DevTools Installer not found - proceeding without loading developer tools.')
+      log.info('Installing VueJS3 DevTools extension ...')
+      const name = await installExtension(VUEJS_DEVTOOLS)
+      log.info(`Added DevTools extension: ${name}`)
+    } catch (err: any) {
+      log.error(`Could not install DevTools extension: ${String(err.message)}`, err)
     }
   }
 
   registerCustomProtocols(log)
+
+  // Prevent navigation away from our main windows and the creation of arbitrary
+  // browser windows with external URLs
+  attachAppNavigationHandlers(log)
 
   // Now boot up the service container
   await appServiceContainer.boot()
@@ -78,6 +84,20 @@ export async function bootApplication (): Promise<void> {
     addToPath(log, path.dirname(process.env.PANDOC_PATH), 'unshift')
     log.info('[Application] The bundled pandoc executable is now in PATH. If you do not want to use the bundled pandoc, uncheck the corresponding setting and reboot the app.')
   }
+
+  // NOTE: Normally, we should check the Pandoc version in the environment check.
+  // However, since the user can decide whether they want to use the internal
+  // one or the system one (if applicable), we have to wait until here to
+  // extract the version string, since we may get any of the two but need the
+  // correct version string of the version that will actually be used.
+  try {
+    const version = await getProgramVersion('pandoc')
+    process.env.PANDOC_VERSION = String(version)
+  } catch (err) {
+    // No Pandoc available.
+  }
+
+  return appServiceContainer
 }
 
 /**

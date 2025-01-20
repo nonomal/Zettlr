@@ -28,35 +28,26 @@ export default class DirNew extends ZettlrCommand {
     * @param  {Object} arg An object containing hash of containing and name of new dir.
     */
   async run (evt: string, arg: any): Promise<boolean> {
-    let sourceDir = this._app.fsal.findDir(arg.path)
-    if (sourceDir === null) {
-      this._app.log.error('Could not create directory: No source given.', arg)
-      this._app.windows.prompt({
-        type: 'error',
-        title: trans('system.error.could_not_create_dir'),
-        message: trans('system.error.could_not_create_dir')
-      })
-      return false
-    }
-
-    const sanitizedName = (arg.name !== undefined) ? sanitize(arg.name.trim(), { replacement: '-' }) : trans('dialog.dir_new.value')
+    const sanitizedName = (arg.name !== undefined) ? sanitize(arg.name.trim(), { replacement: '-' }) : trans('Untitled')
 
     if (sanitizedName.length === 0) {
       this._app.log.error('New directory name was empty after sanitization.', arg)
       this._app.windows.prompt({
         type: 'error',
-        title: trans('system.error.could_not_create_dir'),
-        message: trans('system.error.could_not_create_dir')
+        title: trans('Could not create directory'),
+        message: trans('Could not create directory')
       })
       return false
     }
 
+    const dirPath = path.join(arg.path, sanitizedName)
+
     try {
-      await this._app.fsal.createDir(sourceDir, sanitizedName)
+      await this._app.fsal.createDir(dirPath)
     } catch (err: any) {
       this._app.windows.prompt({
         type: 'error',
-        title: trans('system.error.could_not_create_dir'),
+        title: trans('Could not create directory'),
         message: err.message
       })
       return false
@@ -65,8 +56,7 @@ export default class DirNew extends ZettlrCommand {
     // Now the dir should be created, the FSAL will automatically notify the
     // application of the changes, so all we have to do is set the directory
     // as the new current directory.
-    let newDirPath = path.join(sourceDir.path, sanitizedName)
-    this._app.fsal.openDirectory = this._app.fsal.findDir(newDirPath)
+    this._app.config.set('openDirectory', dirPath)
 
     return true
   }

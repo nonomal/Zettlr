@@ -13,8 +13,26 @@
  * END HEADER
  */
 
+import extractYamlFrontmatter from '@common/util/extract-yaml-frontmatter'
 import ZettlrCommand from './zettlr-command'
-import { MDFileMeta } from '@dts/common/fsal'
+import type { MDFileDescriptor } from '@dts/common/fsal'
+
+const MAX_FILE_PREVIEW_LENGTH = 300
+const MAX_FILE_PREVIEW_LINES = 10
+
+function previewTitleGenerator (userConfig: string, descriptor: MDFileDescriptor): string {
+  if (userConfig.includes('title')&& descriptor.yamlTitle !== undefined) return descriptor.yamlTitle
+  else if (userConfig.includes('heading') && descriptor.firstHeading !== null) return descriptor.firstHeading
+  return descriptor.name
+}
+
+export interface FindFileAndReturnMetadataResult {
+  title: string
+  filePath: string
+  previewMarkdown: string
+  wordCount: number
+  modtime: number
+}
 
 export default class FilePathFindMetaData extends ZettlrCommand {
   constructor (app: any) {
@@ -29,32 +47,44 @@ export default class FilePathFindMetaData extends ZettlrCommand {
    * @param   {string}                         evt  The event
    * @param   {arg}                            arg  The argument, should be a query string
    *
-   * @return  {MDFileMeta|undefined|string[]}       Returns a MetaDescriptor, undefined, or an array
+   * @return  {MDFileDescriptor|undefined|string[]} Returns a MetaDescriptor, undefined, or an array
    */
-  async run (evt: string, arg: any): Promise<MDFileMeta|undefined|any[]> {
+  async run (evt: string, arg: string): Promise<MDFileDescriptor|undefined|FindFileAndReturnMetadataResult> {
+    // The filename can contain a `#`, indicating a specified heading in the target file
+    const filename = arg.includes('#') ? arg.slice(0, arg.indexOf('#')) : arg
     // Quick'n'dirty command to return the Meta descriptor for the given query
+    const descriptor = this._app.workspaces.findExact(filename)
+    if (descriptor === undefined) {
+      return undefined
+    }
+
     if (evt === 'find-exact') {
-      const descriptor = this._app.fsal.findExact(arg)
-      if (descriptor === undefined) {
-        return undefined
-      }
-      return this._app.fsal.getMetadataFor(descriptor) as MDFileMeta
+      return descriptor
     }
 
-    const file = this._app.fsal.findExact(arg)
-    if (file !== undefined) {
-      const metaData = await this._app.fsal.getFileContents(file) as MDFileMeta
-      let content = metaData.content.substring(0, 200) // The content
-      if (metaData.content.length > 200) {
-        content += '...'
-      }
-      const wordCount = metaData.wordCount // The word count
-      const title = metaData.name // The file name
+    const markdown = await this._app.fsal.loadAnySupportedFile(descriptor.path)
+    const { content } = extractYamlFrontmatter(markdown)
+    const lines = content.split('\n')
 
-      return ([ title, content, wordCount, metaData.modtime ])
+    let preview = ''
+    let i = 0
+    const maxPreviewLines = Math.min(lines.length, MAX_FILE_PREVIEW_LINES)
+    while (preview.length <= MAX_FILE_PREVIEW_LENGTH && i < maxPreviewLines) {
+      const remainingChars = MAX_FILE_PREVIEW_LENGTH - preview.length
+      if (lines[i].length <= remainingChars) {
+        preview += lines[i] + '\n'
+      } else {
+        preview += lines[i].slice(0, remainingChars) + '…'
+      }
+      i++
     }
 
-    // We can't find it, so return Not Found
-    return undefined
+    return {
+      title: previewTitleGenerator(this._app.config.get().fileNameDisplay, descriptor),
+      filePath: descriptor.path,
+      previewMarkdown: preview,
+      wordCount: descriptor.wordCount,
+      modtime: descriptor.modtime
+    }
   }
 }

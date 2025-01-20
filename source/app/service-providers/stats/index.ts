@@ -13,12 +13,20 @@
  * END HEADER
  */
 
-import { promises as fs } from 'fs'
 import path from 'path'
 import { app, ipcMain } from 'electron'
 import ProviderContract from '../provider-contract'
-import LogProvider from '../log'
-import { Stats } from '@dts/main/stats-provider'
+import type LogProvider from '../log'
+import PersistentDataContainer from '@common/modules/persistent-data-container'
+import broadcastIPCMessage from '@common/util/broadcast-ipc-message'
+import { today } from '@common/util/stats'
+
+// This is the data exposed publicly
+export interface Stats {
+  wordCount: Record<string, number> // All words for the graph
+  charCount: Record<string, number> // All characters for the graph
+  pomodoros: Record<string, number> // All pomodoros ever completed
+}
 
 /**
  * ZettlrStats works like the ZettlrConfig object, only with a different file.
@@ -28,8 +36,8 @@ import { Stats } from '@dts/main/stats-provider'
  * anyone.)
  */
 export default class StatsProvider extends ProviderContract {
-  private readonly statsPath: string
   private readonly statsFile: string
+  private readonly container: PersistentDataContainer<Stats>
   private stats: Stats
 
   /**
@@ -38,14 +46,12 @@ export default class StatsProvider extends ProviderContract {
    */
   constructor (private readonly _logger: LogProvider) {
     super()
-    this.statsPath = app.getPath('userData')
-    this.statsFile = path.join(this.statsPath, 'stats.json')
+    this.statsFile = path.join(app.getPath('userData'), 'stats.json')
+    this.container = new PersistentDataContainer<Stats>(this.statsFile, 'json')
     this.stats = {
       wordCount: {},
-      pomodoros: {},
-      avgMonth: 0,
-      today: 0,
-      sumMonth: 0
+      charCount: {},
+      pomodoros: {}
     }
 
     ipcMain.handle('stats-provider', (event, payload) => {
@@ -61,7 +67,7 @@ export default class StatsProvider extends ProviderContract {
    */
   async shutdown (): Promise<void> {
     this._logger.verbose('Stats provider shutting down ...')
-    await this.save()
+    this.container.shutdown()
   }
 
   /**
@@ -69,49 +75,22 @@ export default class StatsProvider extends ProviderContract {
    * @return {Object} All statistical data.
    */
   getData (): Stats {
-    return {
-      wordCount: Object.assign({}, this.stats.wordCount),
-      pomodoros: Object.assign({}, this.stats.pomodoros),
-      avgMonth: this.stats.avgMonth,
-      today: this.stats.today,
-      sumMonth: this.stats.sumMonth
-    }
+    return structuredClone(this.stats)
   }
 
   /**
    * Recomputes the statistical properties of the stats
    */
-  async _recompute (): Promise<void> {
+  _recompute (): void {
+    const todayISO = today()
     // Make sure we have a today-count
-    if (this.stats.wordCount[this.today] === undefined) {
-      this.stats.wordCount[this.today] = 0
-    }
+    this.stats.wordCount[todayISO] = this.stats.wordCount[todayISO] ?? 0
+    this.stats.charCount[todayISO] = this.stats.charCount[todayISO] ?? 0
 
     // Trigger a save. _recompute is being called from all the different setters
     // after anything changes. NOTE: Remember this for future stuff!
-    await this.save()
-
-    // Compute average
-    let allwords = []
-    for (let day in this.stats.wordCount) {
-      // hasOwnProperty only returns "true" if the prop is not a default
-      // prop that every object has.
-      if (this.stats.wordCount.hasOwnProperty(day)) {
-        allwords.push(this.stats.wordCount[day])
-      }
-    }
-
-    allwords = allwords.reverse().slice(0, 30) // We only want the last 30 days.
-
-    // Now summarize the last 30 days. Should never exceed 100k.
-    this.stats.sumMonth = 0
-    for (let i = 0; i < allwords.length; i++) {
-      this.stats.sumMonth += allwords[i]
-    }
-
-    // Average last month
-    this.stats.avgMonth = Math.round(this.stats.sumMonth / allwords.length)
-    this.stats.today = this.stats.wordCount[this.today]
+    this.container.set(this.stats)
+    broadcastIPCMessage('stats-updated', this.stats)
   }
 
   /**
@@ -119,47 +98,63 @@ export default class StatsProvider extends ProviderContract {
    */
   async boot (): Promise<void> {
     this._logger.verbose('Stats provider booting up')
-    // Does the file already exist?
-    try {
-      await fs.lstat(this.statsFile)
-      const data = await fs.readFile(this.statsFile, { encoding: 'utf8' })
-      const parsedData = JSON.parse(data)
-      // We cannot safe assign because the wordCount and pomodoros are
-      // dictionaries, and it doesn't work for those (as the stats object
-      // does not contain the properties of the saved state).
-      this.stats = {
-        wordCount: parsedData.wordCount,
-        pomodoros: parsedData.pomodoros,
-        avgMonth: parsedData.avgMonth,
-        today: parsedData.today,
-        sumMonth: parsedData.sumMonth
+
+    if (!await this.container.isInitialized()) {
+      // Stats container is not yet initialized
+      await this.container.init(this.stats)
+    } else {
+      const parsedData = await this.container.get()
+      // We cannot safeAssign here, as we store everything in records, which
+      // would make the function throw the keys away.
+      this.stats.wordCount = parsedData.wordCount ?? {}
+      this.stats.charCount = parsedData.charCount ?? {}
+      this.stats.pomodoros = parsedData.pomodoros ?? {}
+      
+      // Sanity check: We need all entries within date-count-properties in the
+      // data container to conform to the format YYYY-MM-DD: count<number>
+      const dateCounts: Array<keyof Stats> = [ 'wordCount', 'charCount', 'pomodoros' ]
+      for (const prop of dateCounts) {
+        for (const [ key, value ] of Object.entries(this.stats[prop])) {
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) {
+            // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+            delete this.stats[prop][key]
+          } else if (typeof value !== 'number' || Number.isNaN(value)) {
+            this.stats[prop][key] = 0
+          }
+        }
       }
-      this._recompute().catch(e => this._logger.error(`[Stats Provider] Error during recomputing: ${e.message as string}`, e))
-    } catch (err) {
-      // Write initial file
-      await this.save()
     }
+
+    this._recompute()
   }
 
   /**
-   * Increase the word count by val
-   * @param  {Integer} val The amount of words written since the last call of this function.
-   * @return {ZettlrStats}     This for chainability.
+   * Increase the word and character counters by the provided values
+   *
+   * @param  {number}  words  The number of words written since the last call to
+   *                          this function
+   * @param  {number}  chars  The number of characters written since the last
+   *                          call to this function
    */
-  updateWordCount (val: number): void {
-    // Don't substract words
-    if (val < 0) {
-      val = 0
-    }
+  updateCounts (words: number, chars: number): void {
+    // Don't substract values
+    words = Math.max(0, words)
+    chars = Math.max(0, chars)
+    const todayISO = today()
 
-    // For now we only need a word count
-    if (!this.stats.wordCount.hasOwnProperty(this.today)) {
-      this.stats.wordCount[this.today] = val
+    if (!(todayISO in this.stats.wordCount)) {
+      this.stats.wordCount[todayISO] = words
     } else {
-      this.stats.wordCount[this.today] = this.stats.wordCount[this.today] + val
+      this.stats.wordCount[todayISO] += words
     }
 
-    this._recompute().catch(e => this._logger.error(`[Stats Provider] Error during recomputing: ${e.message as string}`, e))
+    if (!(todayISO in this.stats.charCount)) {
+      this.stats.charCount[todayISO] = chars
+    } else {
+      this.stats.charCount[todayISO] += chars
+    }
+
+    this._recompute()
   }
 
   /**
@@ -167,43 +162,13 @@ export default class StatsProvider extends ProviderContract {
    * @return {ZettlrStats} This for chainability.
    */
   increasePomodoros (): void {
-    if (!this.stats.pomodoros.hasOwnProperty(this.today)) {
-      this.stats.pomodoros[this.today] = 1
+    const todayISO = today()
+    if (!(todayISO in this.stats.pomodoros)) {
+      this.stats.pomodoros[todayISO] = 1
     } else {
-      this.stats.pomodoros[this.today] = this.stats.pomodoros[this.today] + 1
+      this.stats.pomodoros[todayISO] += 1
     }
 
-    this._recompute().catch(e => this._logger.error(`[Stats Provider] Error during recomputing: ${e.message as string}`, e))
-  }
-
-  /**
-   * Write the statistics (e.g. on app exit)
-   */
-  async save (): Promise<void> {
-    // (Over-)write the configuration
-    this._logger.info('[Stats Provider] Writing statistics to file')
-    await fs.writeFile(this.statsFile, JSON.stringify(this.stats), { encoding: 'utf8' })
-  }
-
-  /**
-   * Return the given date as a string in the form YYYY-MM-DD
-   * @param {Date} [d = new Date()] The date which should be converted. Defaults to now.
-   * @return {string} Today's date in international standard form.
-   */
-  get today (): string {
-    const d = new Date()
-    let yyyy = d.getFullYear()
-
-    let mm: number|string = d.getMonth() + 1
-    if (mm <= 9) {
-      mm = '0' + mm.toString()
-    }
-
-    let dd: number|string = d.getDate()
-    if (dd <= 9) {
-      dd = '0' + dd.toString()
-    }
-
-    return `${yyyy}-${mm}-${dd}`
+    this._recompute()
   }
 }
